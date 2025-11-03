@@ -1,0 +1,64 @@
+# Build artifacts
+build/
+*.duckdb_extension
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile.cmake
+# Keep our extension config
+!extension_config.cmake
+!CMakeLists.txt
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+venv/
+env/
+ENV/
+.venv
+
+# Generated protobuf files
+*_pb2.py
+*_pb2.pyi
+*.pb.cc
+*.pb.h
+
+# DuckDB
+*.db
+*.duckdb
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Dependencies
+third_party/
+deps/
+
+# Test artifacts
+test_results/
+*.log
+
+# Docker
+.docker/
+
+# Documentation (internal notes, not for distribution)
+DOCUMENTATION.md
+planning/
+

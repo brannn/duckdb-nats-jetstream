@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package telemetry;
+
+// Location information for a device
+message Location {
+  string zone = 1;
+  string rack = 2;
+  string building = 3;
+}
+
+// Electrical metrics
+message Metrics {
+  double kw = 1;           // Kilowatts
+  double pf = 2;           // Power factor
+  double kva = 3;          // Kilovolt-amperes
+  double voltage = 4;      // Voltage
+  double current = 5;      // Current in amps
+  double frequency = 6;    // Frequency in Hz
+}
+
+// Main telemetry message
+message Telemetry {
+  string device_id = 1;
+  int64 timestamp = 2;        // Unix timestamp in milliseconds
+  Location location = 3;      // Nested location
+  Metrics metrics = 4;        // Nested metrics
+  bool online = 5;
+  string firmware_version = 6;
+}
+
