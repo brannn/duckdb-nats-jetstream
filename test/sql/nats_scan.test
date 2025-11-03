@@ -1,0 +1,11 @@
+# name: test/sql/nats_scan.test
+# description: Test nats_scan table function
+# group: [nats_js]
+
+# Require the extension to be loaded
+require nats_js
+
+# Test that the extension loads
+statement ok
+SELECT 1;
+

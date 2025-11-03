@@ -1,0 +1,38 @@
+syntax = "proto3";
+
+package test;
+
+// Test message with all supported protobuf types
+message TypesTest {
+  // String types
+  string str_field = 1;
+  bytes bytes_field = 2;
+  
+  // Integer types
+  int32 int32_field = 3;
+  int64 int64_field = 4;
+  uint32 uint32_field = 5;
+  uint64 uint64_field = 6;
+  sint32 sint32_field = 7;
+  sint64 sint64_field = 8;
+  fixed32 fixed32_field = 9;
+  fixed64 fixed64_field = 10;
+  sfixed32 sfixed32_field = 11;
+  sfixed64 sfixed64_field = 12;
+  
+  // Floating point types
+  float float_field = 13;
+  double double_field = 14;
+  
+  // Boolean
+  bool bool_field = 15;
+  
+  // Enum
+  enum Status {
+    UNKNOWN = 0;
+    ACTIVE = 1;
+    INACTIVE = 2;
+  }
+  Status status_field = 16;
+}
+
