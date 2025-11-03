@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DuckDB NATS JetStream Extension Demo</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 40px 20px;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .container {
+            max-width: 1400px;
+            width: 100%;
+            background: #1e1e1e;
+            border-radius: 12px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            overflow: hidden;
+        }
+
+        .header {
+            background: #2d2d30;
+            padding: 20px 30px;
+            border-bottom: 1px solid #3e3e42;
+        }
+
+        .header h1 {
+            color: #ffd43b;
+            font-size: 24px;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+
+        .header p {
+            color: #a0a0a0;
+            font-size: 14px;
+        }
+
+        .demo-grid {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 0;
+        }
+
+        .terminal-section {
+            background: #1e1e1e;
+            padding: 30px;
+            border-bottom: 1px solid #3e3e42;
+        }
+
+        .terminal-section:last-child {
+            border-bottom: none;
+        }
+
+        .section-title {
+            color: #4ec9b0;
+            font-size: 14px;
+            font-weight: 600;
+            margin-bottom: 15px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .terminal-content {
+            background: #0e0e0e;
+            border-radius: 6px;
+            padding: 20px;
+            border: 1px solid #3e3e42;
+        }
+
+        .command-line {
+            margin-bottom: 12px;
+        }
+
+        .prompt {
+            color: #4ec9b0;
+            margin-right: 8px;
+        }
+
+        .command {
+            color: #dcdcaa;
+        }
+
+        .comment {
+            color: #6a9955;
+            font-style: italic;
+        }
+
+        .output {
+            color: #d4d4d4;
+            margin-top: 8px;
+            margin-left: 0;
+            line-height: 1.6;
+        }
+
+        .sql-keyword {
+            color: #569cd6;
+            font-weight: 600;
+        }
+
+        .sql-function {
+            color: #dcdcaa;
+        }
+
+        .sql-string {
+            color: #ce9178;
+        }
+
+        .sql-number {
+            color: #b5cea8;
+        }
+
+        .sql-operator {
+            color: #d4d4d4;
+        }
+
+        .table-output {
+            margin-top: 15px;
+            overflow-x: auto;
+        }
+
+        .table-output pre {
+            color: #d4d4d4;
+            line-height: 1.4;
+            font-size: 13px;
+        }
+
+        .success {
+            color: #4ec9b0;
+        }
+
+        .highlight {
+            color: #ffd43b;
+        }
+
+        .separator {
+            height: 1px;
+            background: #3e3e42;
+            margin: 20px 0;
+        }
+
+        @media (max-width: 768px) {
+            body {
+                padding: 20px 10px;
+            }
+            
+            .header h1 {
+                font-size: 20px;
+            }
+            
+            .terminal-section {
+                padding: 20px;
+            }
+            
+            .table-output pre {
+                font-size: 11px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🐤 DuckDB NATS JetStream Extension</h1>
+            <p>Query NATS JetStream message streams directly with SQL</p>
+        </div>
+
+        <div class="demo-grid">
+            <!-- Installation Section -->
+            <div class="terminal-section">
+                <div class="section-title">① Installation</div>
+                <div class="terminal-content">
+                    <div class="command-line">
+                        <span class="prompt">D</span>
+                        <span class="command"><span class="sql-keyword">INSTALL</span> nats_js <span class="sql-keyword">FROM</span> community;</span>
+                    </div>
+                    <div class="output success">Installing nats_js...</div>
+                    <div class="output success">Extension nats_js successfully installed.</div>
+                    
+                    <div class="separator"></div>
+                    
+                    <div class="command-line">
+                        <span class="prompt">D</span>
+                        <span class="command"><span class="sql-keyword">LOAD</span> nats_js;</span>
+                    </div>
+                    <div class="output success">Extension nats_js loaded successfully.</div>
+                </div>
+            </div>
+
+            <!-- Query Section -->
+            <div class="terminal-section">
+                <div class="section-title">② Query Messages with JSON Extraction</div>
+                <div class="terminal-content">
+                    <div class="command-line">
+                        <span class="prompt">D</span>
+                        <span class="command"><span class="sql-keyword">SELECT</span> seq, ts_nats, subject, device_id, kw</span>
+                    </div>
+                    <div class="command-line">
+                        <span class="command"><span class="sql-keyword">FROM</span> <span class="sql-function">nats_scan</span>(</span>
+                    </div>
+                    <div class="command-line">
+                        <span class="command">    <span class="sql-string">'telemetry'</span>,</span>
+                    </div>
+                    <div class="command-line">
+                        <span class="command">    url <span class="sql-operator">:=</span> <span class="sql-string">'nats://nats.messaging.svc.cluster.local:4222'</span>,</span>
+                    </div>
+                    <div class="command-line">
+                        <span class="command">    start_time <span class="sql-operator">:=</span> <span class="sql-string">'2025-11-01 09:00:00'</span><span class="sql-operator">::</span><span class="sql-keyword">TIMESTAMP</span>,</span>
+                    </div>
+                    <div class="command-line">
+                        <span class="command">    end_time <span class="sql-operator">:=</span> <span class="sql-string">'2025-11-01 09:05:00'</span><span class="sql-operator">::</span><span class="sql-keyword">TIMESTAMP</span>,</span>
+                    </div>
+                    <div class="command-line">
+                        <span class="command">    subject <span class="sql-operator">:=</span> <span class="sql-string">'telemetry.dc1.power'</span>,</span>
+                    </div>
+                    <div class="command-line">
+                        <span class="command">    json_extract <span class="sql-operator">:=</span> [<span class="sql-string">'device_id'</span>, <span class="sql-string">'kw'</span>]</span>
+                    </div>
+                    <div class="command-line">
+                        <span class="command">)</span>
+                    </div>
+                    <div class="command-line">
+                        <span class="command"><span class="sql-keyword">ORDER BY</span> seq <span class="sql-keyword">LIMIT</span> <span class="sql-number">5</span>;</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Results Section -->
+            <div class="terminal-section">
+                <div class="section-title">③ Results</div>
+                <div class="terminal-content">
+                    <div class="table-output">
+                        <pre>┌────────┬─────────────────────────┬──────────────────────────────────┬──────────────┬───────┐
+│  seq   │        ts_nats          │             subject              │  device_id   │  kw   │
+│ uint64 │       timestamp         │            varchar               │   varchar    │varchar│
+├────────┼─────────────────────────┼──────────────────────────────────┼──────────────┼───────┤
+│      1 │ 2025-11-01 09:00:00.000 │ telemetry.dc1.power.pm5560-001   │ pm5560-001   │ 42.5  │
+│      2 │ 2025-11-01 09:00:15.000 │ telemetry.dc1.power.pm5560-002   │ pm5560-002   │ 38.2  │
+│      3 │ 2025-11-01 09:01:30.000 │ telemetry.dc1.power.pm5560-003   │ pm5560-003   │ 51.7  │
+│      4 │ 2025-11-01 09:02:45.000 │ telemetry.dc1.power.pm5560-004   │ pm5560-004   │ 45.3  │
+│      5 │ 2025-11-01 09:04:00.000 │ telemetry.dc1.power.pm5560-005   │ pm5560-005   │ 39.8  │
+└────────┴─────────────────────────┴──────────────────────────────────┴──────────────┴───────┘</pre>
+                    </div>
+                    <div class="output" style="margin-top: 15px;">
+                        <span class="success">5 rows returned</span> <span class="comment">// Timestamp range + subject filter + JSON extraction</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
+
