@@ -376,8 +376,9 @@ static unique_ptr<FunctionData> NatsScanBind(ClientContext &context, TableFuncti
     return_types.emplace_back(LogicalType(LogicalTypeId::TIMESTAMP));
 
     names.emplace_back("payload");
-    // Use BLOB for payload when using protobuf (binary data), VARCHAR for JSON
-    if (!proto_fields.empty()) {
+    // Use BLOB for payload when using protobuf OR when no extraction is specified
+    // This prevents UTF-8 validation errors on binary/protobuf data
+    if (!proto_fields.empty() || json_fields.empty()) {
         return_types.emplace_back(LogicalType(LogicalTypeId::BLOB));
     } else {
         return_types.emplace_back(LogicalType(LogicalTypeId::VARCHAR));
@@ -763,8 +764,9 @@ static void NatsScanExecute(ClientContext &context, TableFunctionInput &data_p, 
         const char *data = natsMsg_GetData(msg);
         int data_len = natsMsg_GetDataLength(msg);
 
-        // Use BLOB for protobuf (binary data), VARCHAR for JSON/text
-        if (!bind_data.proto_fields.empty()) {
+        // Use BLOB for protobuf OR when no extraction is specified (prevents UTF-8 validation errors)
+        // Use VARCHAR only when json_extract is specified (data is known to be valid JSON/UTF-8)
+        if (!bind_data.proto_fields.empty() || bind_data.json_fields.empty()) {
             output.SetValue(4, count, Value::BLOB(const_data_ptr_cast(data), data_len));
         } else {
             string payload_str(data, data_len);
