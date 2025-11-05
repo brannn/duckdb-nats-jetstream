@@ -62,3 +62,7 @@ test_results/
 DOCUMENTATION.md
 planning/
 
+# Demo files (generated for screenshots)
+demo.html
+demo-protobuf.html
+
