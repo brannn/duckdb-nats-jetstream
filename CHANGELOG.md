@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [0.1.1] - 2025-11-05
+
+### Fixed
+- Payload column now returns BLOB instead of VARCHAR when no extraction parameters specified, preventing UTF-8 validation errors on binary data
+
 ## [0.1.0] - 2025-11-03
 
 ### Added
