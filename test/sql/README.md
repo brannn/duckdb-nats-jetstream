@@ -27,6 +27,13 @@ Error handling test suite covering:
 - Invalid nested field paths
 - Mixing json_extract and proto_extract
 
+### `test_payload_blob.sql`
+Payload BLOB type test suite covering:
+- Payload is BLOB when no extraction parameters specified
+- Querying metadata without UTF-8 validation errors
+- Payload is BLOB with protobuf extraction
+- Manual casting of BLOB payload to VARCHAR when needed
+
 ## Prerequisites
 
 1. **NATS server running:**
