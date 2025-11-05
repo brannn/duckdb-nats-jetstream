@@ -101,15 +101,15 @@ FROM nats_scan('telemetry');
 ```
 ┌───────────┬──────────────────────────────────┬────────┬─────────────────────────┬──────────────────────────────────────┐
 │  stream   │             subject              │  seq   │        ts_nats          │               payload                │
-│  varchar  │             varchar              │ uint64 │       timestamp         │               varchar                │
+│  varchar  │             varchar              │ uint64 │       timestamp         │                blob                  │
 ├───────────┼──────────────────────────────────┼────────┼─────────────────────────┼──────────────────────────────────────┤
-│ telemetry │ telemetry.dc1.power.pm5560-001   │      1 │ 2025-11-01 09:00:00     │ {"device_id":"pm5560-001","kw":42.5} │
-│ telemetry │ telemetry.dc1.power.pm5560-002   │      2 │ 2025-11-01 09:00:01     │ {"device_id":"pm5560-002","kw":38.2} │
-│ telemetry │ telemetry.dc1.power.pm5560-003   │      3 │ 2025-11-01 09:00:02     │ {"device_id":"pm5560-003","kw":51.7} │
+│ telemetry │ telemetry.dc1.power.pm5560-001   │      1 │ 2025-11-01 09:00:00     │ \x7B\x22\x64\x65\x76\x69\x63\x65...  │
+│ telemetry │ telemetry.dc1.power.pm5560-002   │      2 │ 2025-11-01 09:00:01     │ \x7B\x22\x64\x65\x76\x69\x63\x65...  │
+│ telemetry │ telemetry.dc1.power.pm5560-003   │      3 │ 2025-11-01 09:00:02     │ \x7B\x22\x64\x65\x76\x69\x63\x65...  │
 └───────────┴──────────────────────────────────┴────────┴─────────────────────────┴──────────────────────────────────────┘
 ```
 
-The function returns five base columns: `stream` (VARCHAR), `subject` (VARCHAR), `seq` (UBIGINT), `ts_nats` (TIMESTAMP), and `payload` (VARCHAR for JSON messages, BLOB for protobuf messages).
+The function returns five base columns: `stream` (VARCHAR), `subject` (VARCHAR), `seq` (UBIGINT), `ts_nats` (TIMESTAMP), and `payload` (BLOB by default, VARCHAR when using `json_extract`).
 
 ### Sequence Range Queries
 
@@ -369,7 +369,11 @@ The extension extracts and decodes protobuf fields, then DuckDB applies the WHER
 
 ### Payload Column Behavior
 
-When using protobuf extraction, the `payload` column contains the raw binary protobuf data as a BLOB type (instead of VARCHAR for JSON messages). This prevents encoding errors when displaying binary data:
+The `payload` column type depends on the extraction parameters used:
+- **BLOB** (default): When no extraction parameters are specified, or when using `proto_extract`
+- **VARCHAR**: When using `json_extract` for JSON messages
+
+This prevents UTF-8 validation errors on binary data while keeping JSON messages readable:
 
 ```sql
 SELECT seq, typeof(payload) as payload_type, octet_length(payload) as payload_size
