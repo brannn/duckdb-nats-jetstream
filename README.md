@@ -54,12 +54,10 @@ ORDER BY seq;
 
 ---
 
-## [Full Documentation](docs/GUIDE.md)
+## Documentation
 
-Complete guide including:
-- Installation instructions
-- Query examples and patterns
-- Protocol Buffers integration
+- **[Examples](docs/EXAMPLES.md)** - Practical examples for common use cases
+- **[Full Guide](docs/GUIDE.md)** - Complete documentation including installation, query patterns, and Protocol Buffers integration
 - Performance considerations
 - API reference
 
