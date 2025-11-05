@@ -322,6 +322,121 @@ SELECT * FROM nats_scan('telemetry',
 -- Error: Failed to connect to NATS server
 ```
 
+## Data Pipeline Patterns
+
+### Batch Processing with External Acknowledgment
+
+The extension uses the NATS Direct Get API for read-only access to streams. For data pipelines that require message acknowledgment after processing, use an external consumer workflow:
+
+```bash
+# 1. Create a durable consumer with explicit acknowledgment
+nats consumer add telemetry etl-processor \
+  --filter "telemetry.>" \
+  --ack explicit \
+  --pull \
+  --deliver all \
+  --max-deliver=-1 \
+  --max-pending=1000
+
+# 2. Get the consumer's current sequence position
+CONSUMER_SEQ=$(nats consumer info telemetry etl-processor -j | jq -r '.delivered.stream_seq')
+
+# 3. Process a batch with DuckDB
+duckdb << EOF
+LOAD nats_js;
+COPY (
+    SELECT device_id, kw, voltage, ts_nats
+    FROM nats_scan('telemetry',
+        start_seq := ${CONSUMER_SEQ},
+        end_seq := ${CONSUMER_SEQ} + 999,
+        json_extract := ['device_id', 'kw', 'voltage']
+    )
+) TO 'batch_output.parquet' (FORMAT PARQUET);
+EOF
+
+# 4. Acknowledge the batch after successful processing
+nats consumer next telemetry etl-processor --count 1000 --ack
+```
+
+This pattern separates read operations (DuckDB) from acknowledgment (NATS consumer), allowing batch processing with guaranteed delivery semantics.
+
+### Incremental Processing with State Tracking
+
+Track processing state externally to enable incremental batch processing:
+
+```sql
+-- Create a state table to track last processed sequence
+CREATE TABLE processing_state (
+    stream_name VARCHAR,
+    last_seq UBIGINT,
+    last_updated TIMESTAMP
+);
+
+-- Initialize state
+INSERT INTO processing_state VALUES ('telemetry', 0, CURRENT_TIMESTAMP);
+
+-- Process next batch
+WITH current_state AS (
+    SELECT last_seq FROM processing_state WHERE stream_name = 'telemetry'
+),
+batch AS (
+    SELECT seq, device_id, kw, voltage
+    FROM nats_scan('telemetry',
+        start_seq := (SELECT last_seq + 1 FROM current_state),
+        end_seq := (SELECT last_seq + 1000 FROM current_state),
+        json_extract := ['device_id', 'kw', 'voltage']
+    )
+)
+INSERT INTO telemetry_processed SELECT * FROM batch;
+
+-- Update state after successful processing
+UPDATE processing_state
+SET last_seq = (SELECT MAX(seq) FROM telemetry_processed),
+    last_updated = CURRENT_TIMESTAMP
+WHERE stream_name = 'telemetry';
+```
+
+### Scheduled Batch ETL
+
+Combine DuckDB queries with scheduled jobs for periodic batch processing:
+
+```bash
+#!/bin/bash
+# etl_hourly.sh - Process last hour of telemetry data
+
+HOUR_AGO=$(date -u -d '1 hour ago' '+%Y-%m-%d %H:00:00')
+NOW=$(date -u '+%Y-%m-%d %H:00:00')
+
+duckdb analytics.db << EOF
+LOAD nats_js;
+
+-- Extract and transform data
+CREATE TEMP TABLE hourly_batch AS
+SELECT
+    device_id,
+    DATE_TRUNC('minute', ts_nats) as minute,
+    AVG(kw::DOUBLE) as avg_kw,
+    MAX(kw::DOUBLE) as max_kw,
+    MIN(kw::DOUBLE) as min_kw,
+    COUNT(*) as reading_count
+FROM nats_scan('telemetry',
+    start_time := '${HOUR_AGO}'::TIMESTAMP,
+    end_time := '${NOW}'::TIMESTAMP,
+    json_extract := ['device_id', 'kw']
+)
+GROUP BY device_id, minute;
+
+-- Load into warehouse table
+INSERT INTO telemetry_hourly_agg SELECT * FROM hourly_batch;
+EOF
+```
+
+Schedule with cron for automated processing:
+
+```cron
+0 * * * * /path/to/etl_hourly.sh
+```
+
 ## Performance Considerations
 
 ### Limit Result Sets
