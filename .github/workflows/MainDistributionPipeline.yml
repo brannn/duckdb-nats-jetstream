@@ -12,8 +12,61 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  test:
+    name: Run Test Suite
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          submodules: 'true'
+          fetch-depth: 0
+
+      - name: Install Python dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          pip install nats-py
+
+      - name: Install NATS CLI
+        run: |
+          curl -sf https://binaries.nats.dev/nats-io/natscli/nats@latest | sh
+          sudo mv nats /usr/local/bin/
+
+      - name: Start NATS server
+        run: docker-compose up -d
+
+      - name: Wait for NATS to be ready
+        run: sleep 10
+
+      - name: Setup DuckDB
+        run: |
+          wget https://github.com/duckdb/duckdb/releases/download/v1.4.2/duckdb_cli-linux-amd64.zip
+          unzip duckdb_cli-linux-amd64.zip
+          chmod +x duckdb
+          sudo mv duckdb /usr/local/bin/
+
+      - name: Build extension
+        run: make release
+
+      - name: Run test suite
+        run: |
+          chmod +x test/run_all_tests.sh
+          ./test/run_all_tests.sh
+
+      - name: Upload test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v3
+        with:
+          name: test-logs
+          path: /tmp/nats_test_*.log
+
+      - name: Cleanup
+        if: always()
+        run: docker-compose down
+
   duckdb-stable-build:
     name: Build extension binaries
+    needs: test
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v1.4.1
     with:
       duckdb_version: v1.4.1
