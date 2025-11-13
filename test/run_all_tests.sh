@@ -160,8 +160,8 @@ echo -e "${BLUE}=========================================${NC}"
 cd "$PROJECT_ROOT"
 
 # Test order (logical progression)
+# Note: .test files use DuckDB's test framework syntax and are skipped
 TEST_FILES=(
-    "test/sql/nats_scan.test"
     "test/sql/test_json_extraction.sql"
     "test/sql/test_timestamp_queries.sql"
     "test/sql/test_sequence_ranges.sql"
