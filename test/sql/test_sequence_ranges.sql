@@ -15,7 +15,7 @@ SELECT
     seq,
     device_id,
     metrics_kw
-FROM nats_scan('telemetry',
+FROM nats_scan('telemetry_proto',
     proto_file := 'test/proto/telemetry.proto',
     proto_message := 'Telemetry',
     proto_extract := ['device_id', 'metrics.kw'],
@@ -32,7 +32,7 @@ SELECT
     seq,
     device_id,
     location_zone
-FROM nats_scan('telemetry',
+FROM nats_scan('telemetry_proto',
     proto_file := 'test/proto/telemetry.proto',
     proto_message := 'Telemetry',
     proto_extract := ['device_id', 'location.zone'],
@@ -45,25 +45,26 @@ FROM nats_scan('telemetry',
 .print Test 3: Last 10 messages
 .print ========================================
 
-WITH stream_info AS (
-    SELECT MAX(seq) as last_seq
-    FROM nats_scan('telemetry',
-        proto_file := 'test/proto/telemetry.proto',
-        proto_message := 'Telemetry',
-        proto_extract := ['device_id']
-    )
-)
+-- Get the last sequence number first
+CREATE TEMP TABLE stream_info AS
+SELECT MAX(seq) as last_seq
+FROM nats_scan('telemetry_proto',
+    proto_file := 'test/proto/telemetry.proto',
+    proto_message := 'Telemetry',
+    proto_extract := ['device_id']
+);
+
+-- Use the last sequence to query the last 10 messages
 SELECT
     seq,
     device_id,
     metrics_kw
-FROM nats_scan('telemetry',
+FROM nats_scan('telemetry_proto',
     proto_file := 'test/proto/telemetry.proto',
     proto_message := 'Telemetry',
-    proto_extract := ['device_id', 'metrics.kw'],
-    start_seq := (SELECT last_seq - 9 FROM stream_info),
-    end_seq := (SELECT last_seq FROM stream_info)
+    proto_extract := ['device_id', 'metrics.kw']
 )
+WHERE seq >= (SELECT last_seq - 9 FROM stream_info)
 ORDER BY seq;
 
 .print
@@ -75,7 +76,7 @@ SELECT
     COUNT(*) as total_in_range,
     MIN(seq) as first_seq,
     MAX(seq) as last_seq
-FROM nats_scan('telemetry',
+FROM nats_scan('telemetry_proto',
     proto_file := 'test/proto/telemetry.proto',
     proto_message := 'Telemetry',
     proto_extract := ['device_id'],
@@ -88,18 +89,22 @@ FROM nats_scan('telemetry',
 .print Test 5: Detect sequence gaps
 .print ========================================
 
-SELECT
-    seq,
-    LAG(seq) OVER (ORDER BY seq) as prev_seq,
-    seq - LAG(seq) OVER (ORDER BY seq) as gap
-FROM nats_scan('telemetry',
-    proto_file := 'test/proto/telemetry.proto',
-    proto_message := 'Telemetry',
-    proto_extract := ['device_id'],
-    start_seq := 1,
-    end_seq := 100
+WITH seq_with_gaps AS (
+    SELECT
+        seq,
+        LAG(seq) OVER (ORDER BY seq) as prev_seq,
+        seq - LAG(seq) OVER (ORDER BY seq) as gap
+    FROM nats_scan('telemetry_proto',
+        proto_file := 'test/proto/telemetry.proto',
+        proto_message := 'Telemetry',
+        proto_extract := ['device_id'],
+        start_seq := 1,
+        end_seq := 100
+    )
 )
-WHERE seq - LAG(seq) OVER (ORDER BY seq) > 1;
+SELECT seq, prev_seq, gap
+FROM seq_with_gaps
+WHERE gap > 1;
 
 .print
 .print ========================================
@@ -110,7 +115,7 @@ SELECT
     COUNT(*) as count_from_seq,
     MIN(seq) as first_seq,
     MAX(seq) as last_seq
-FROM nats_scan('telemetry',
+FROM nats_scan('telemetry_proto',
     proto_file := 'test/proto/telemetry.proto',
     proto_message := 'Telemetry',
     proto_extract := ['device_id'],
@@ -126,7 +131,7 @@ SELECT
     COUNT(*) as count_until_seq,
     MIN(seq) as first_seq,
     MAX(seq) as last_seq
-FROM nats_scan('telemetry',
+FROM nats_scan('telemetry_proto',
     proto_file := 'test/proto/telemetry.proto',
     proto_message := 'Telemetry',
     proto_extract := ['device_id'],
@@ -135,16 +140,18 @@ FROM nats_scan('telemetry',
 
 .print
 .print ========================================
-.print Test 8: Sequence range with JSON extraction
+.print Test 8: Sequence range with protobuf extraction
 .print ========================================
 
 SELECT
     seq,
     device_id,
-    kw::DOUBLE as kw,
-    zone
-FROM nats_scan('telemetry',
-    json_extract := ['device_id', 'kw', 'zone'],
+    metrics_kw as kw,
+    location_zone as zone
+FROM nats_scan('telemetry_proto',
+    proto_file := 'test/proto/telemetry.proto',
+    proto_message := 'Telemetry',
+    proto_extract := ['device_id', 'metrics.kw', 'location.zone'],
     start_seq := 50,
     end_seq := 100
 )
@@ -160,7 +167,7 @@ WITH ordered AS (
     SELECT
         seq,
         ROW_NUMBER() OVER (ORDER BY seq) as expected_position
-    FROM nats_scan('telemetry',
+    FROM nats_scan('telemetry_proto',
         proto_file := 'test/proto/telemetry.proto',
         proto_message := 'Telemetry',
         proto_extract := ['device_id'],
@@ -184,7 +191,7 @@ SELECT
     seq,
     subject,
     device_id
-FROM nats_scan('telemetry',
+FROM nats_scan('telemetry_proto',
     proto_file := 'test/proto/telemetry.proto',
     proto_message := 'Telemetry',
     proto_extract := ['device_id'],
@@ -205,7 +212,7 @@ SELECT
     ROUND(AVG(metrics_kw), 2) as avg_kw,
     MIN(seq) as first_seq,
     MAX(seq) as last_seq
-FROM nats_scan('telemetry',
+FROM nats_scan('telemetry_proto',
     proto_file := 'test/proto/telemetry.proto',
     proto_message := 'Telemetry',
     proto_extract := ['location.zone', 'metrics.kw'],
@@ -220,16 +227,24 @@ ORDER BY location_zone;
 .print Test 12: Environmental stream sequence range
 .print ========================================
 
+-- Get the first sequence number from the environmental stream
+CREATE TEMP TABLE env_stream_info AS
+SELECT MIN(seq) as first_seq
+FROM nats_scan('environmental',
+    json_extract := ['device_id']
+);
+
+-- Query a range of 20 messages starting from the first sequence
 SELECT
     seq,
     device_id,
     zone,
     temp_c::DOUBLE as temp_c
 FROM nats_scan('environmental',
-    json_extract := ['device_id', 'zone', 'temp_c'],
-    start_seq := 1,
-    end_seq := 20
+    json_extract := ['device_id', 'zone', 'temp_c']
 )
+WHERE seq >= (SELECT first_seq FROM env_stream_info)
+  AND seq < (SELECT first_seq + 20 FROM env_stream_info)
 ORDER BY seq;
 
 .print

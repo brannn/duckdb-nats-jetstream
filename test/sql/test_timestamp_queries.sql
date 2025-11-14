@@ -18,7 +18,9 @@ SELECT
 FROM nats_scan('telemetry',
     start_time := (current_timestamp - INTERVAL '2 hours')::TIMESTAMP,
     end_time := (current_timestamp - INTERVAL '1 hour')::TIMESTAMP,
-    json_extract := ['device_id']
+    proto_file := 'test/proto/telemetry.proto',
+    proto_message := 'Telemetry',
+    proto_extract := ['device_id']
 );
 
 .print
@@ -33,7 +35,9 @@ SELECT
 FROM nats_scan('telemetry',
     start_time := (current_timestamp - INTERVAL '2 hours')::TIMESTAMP,
     end_time := (current_timestamp - INTERVAL '1 hour')::TIMESTAMP,
-    json_extract := ['device_id']
+    proto_file := 'test/proto/telemetry.proto',
+    proto_message := 'Telemetry',
+    proto_extract := ['device_id']
 )
 ORDER BY ts_nats
 LIMIT 10;
@@ -49,7 +53,9 @@ SELECT
     MAX(ts_nats) as last_message
 FROM nats_scan('telemetry',
     start_time := (current_timestamp - INTERVAL '4 hours')::TIMESTAMP,
-    json_extract := ['device_id']
+    proto_file := 'test/proto/telemetry.proto',
+    proto_message := 'Telemetry',
+    proto_extract := ['device_id']
 );
 
 .print
@@ -63,7 +69,9 @@ SELECT
     MAX(ts_nats) as last_message
 FROM nats_scan('telemetry',
     end_time := (current_timestamp - INTERVAL '1 hour')::TIMESTAMP,
-    json_extract := ['device_id']
+    proto_file := 'test/proto/telemetry.proto',
+    proto_message := 'Telemetry',
+    proto_extract := ['device_id']
 );
 
 .print
@@ -76,7 +84,9 @@ SELECT
 FROM nats_scan('telemetry',
     start_time := (current_timestamp - INTERVAL '2 hours')::TIMESTAMP,
     end_time := (current_timestamp - INTERVAL '2 hours' + INTERVAL '5 minutes')::TIMESTAMP,
-    json_extract := ['device_id']
+    proto_file := 'test/proto/telemetry.proto',
+    proto_message := 'Telemetry',
+    proto_extract := ['device_id']
 );
 
 .print
@@ -91,7 +101,9 @@ SELECT
 FROM nats_scan('telemetry',
     start_time := (current_timestamp - INTERVAL '12 hours')::TIMESTAMP,
     end_time := current_timestamp::TIMESTAMP,
-    json_extract := ['device_id']
+    proto_file := 'test/proto/telemetry.proto',
+    proto_message := 'Telemetry',
+    proto_extract := ['device_id']
 );
 
 .print
@@ -103,7 +115,9 @@ SELECT COUNT(*) as count_before_stream
 FROM nats_scan('telemetry',
     start_time := '2020-01-01 00:00:00'::TIMESTAMP,
     end_time := '2020-01-01 01:00:00'::TIMESTAMP,
-    json_extract := ['device_id']
+    proto_file := 'test/proto/telemetry.proto',
+    proto_message := 'Telemetry',
+    proto_extract := ['device_id']
 );
 
 .print
@@ -115,7 +129,9 @@ SELECT COUNT(*) as count_future
 FROM nats_scan('telemetry',
     start_time := '2030-01-01 00:00:00'::TIMESTAMP,
     end_time := '2030-01-01 01:00:00'::TIMESTAMP,
-    json_extract := ['device_id']
+    proto_file := 'test/proto/telemetry.proto',
+    proto_message := 'Telemetry',
+    proto_extract := ['device_id']
 );
 
 .print
@@ -131,7 +147,9 @@ WITH ordered_results AS (
     FROM nats_scan('telemetry',
         start_time := (current_timestamp - INTERVAL '3 hours')::TIMESTAMP,
         end_time := (current_timestamp - INTERVAL '2 hours')::TIMESTAMP,
-        json_extract := ['device_id']
+        proto_file := 'test/proto/telemetry.proto',
+    proto_message := 'Telemetry',
+    proto_extract := ['device_id']
     )
     LIMIT 100
 )
@@ -171,7 +189,9 @@ FROM nats_scan('telemetry',
     start_time := (current_timestamp - INTERVAL '3 hours')::TIMESTAMP,
     end_time := (current_timestamp - INTERVAL '2 hours')::TIMESTAMP,
     subject := 'zone-a',
-    json_extract := ['device_id']
+    proto_file := 'test/proto/telemetry.proto',
+    proto_message := 'Telemetry',
+    proto_extract := ['device_id']
 );
 
 .print

@@ -71,18 +71,18 @@ async def generate_and_publish():
             # Serialize to binary
             binary_data = msg.SerializeToString()
             
-            # Publish to NATS
-            subject = f"telemetry.{device['zone']}.power.pm5560.{device['id']}"
+            # Publish to NATS (using telemetry_proto stream to separate from JSON data)
+            subject = f"telemetry_proto.{device['zone']}.power.pm5560.{device['id']}"
             await js.publish(subject, binary_data)
-            
+
             message_count += 1
-            
+
             if message_count % 50 == 0:
                 print(f"Published {message_count} messages...")
-    
+
     print(f"\n✓ Published {message_count} protobuf messages to JetStream")
-    print(f"  Stream: telemetry")
-    print(f"  Subjects: telemetry.*.power.pm5560.*")
+    print(f"  Stream: telemetry_proto")
+    print(f"  Subjects: telemetry_proto.*.power.pm5560.*")
     print(f"  Format: Protocol Buffers (binary)")
     print(f"  Schema: test/proto/telemetry.proto")
     

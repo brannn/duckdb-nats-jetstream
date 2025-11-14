@@ -174,7 +174,7 @@ TEST_FILES=(
 
 for test_file in "${TEST_FILES[@]}"; do
     if [ -f "$test_file" ]; then
-        run_test "$test_file"
+        run_test "$test_file" || true  # Continue even if test fails
     else
         echo -e "${YELLOW}⊘ SKIPPED: $(basename $test_file) (file not found)${NC}"
         SKIPPED_TESTS+=("$(basename $test_file)")

@@ -11,7 +11,7 @@ LOAD 'build/release/nats_js.duckdb_extension';
 .print Expected: Error message
 .print ========================================
 
-SELECT * FROM nats_scan('telemetry', 
+SELECT * FROM nats_scan('telemetry_proto', 
     proto_message := 'Telemetry',
     proto_extract := ['device_id']
 ) LIMIT 1;
@@ -22,7 +22,7 @@ SELECT * FROM nats_scan('telemetry',
 .print Expected: Error message
 .print ========================================
 
-SELECT * FROM nats_scan('telemetry', 
+SELECT * FROM nats_scan('telemetry_proto', 
     proto_file := 'test/proto/telemetry.proto',
     proto_extract := ['device_id']
 ) LIMIT 1;
@@ -33,7 +33,7 @@ SELECT * FROM nats_scan('telemetry',
 .print Expected: Error message
 .print ========================================
 
-SELECT * FROM nats_scan('telemetry', 
+SELECT * FROM nats_scan('telemetry_proto', 
     proto_file := 'test/proto/nonexistent.proto',
     proto_message := 'Telemetry',
     proto_extract := ['device_id']
@@ -45,7 +45,7 @@ SELECT * FROM nats_scan('telemetry',
 .print Expected: Error message
 .print ========================================
 
-SELECT * FROM nats_scan('telemetry', 
+SELECT * FROM nats_scan('telemetry_proto', 
     proto_file := 'test/proto/telemetry.proto',
     proto_message := 'NonExistentMessage',
     proto_extract := ['device_id']
@@ -57,7 +57,7 @@ SELECT * FROM nats_scan('telemetry',
 .print Expected: Error message
 .print ========================================
 
-SELECT * FROM nats_scan('telemetry', 
+SELECT * FROM nats_scan('telemetry_proto', 
     proto_file := 'test/proto/telemetry.proto',
     proto_message := 'Telemetry',
     proto_extract := ['nonexistent_field']
@@ -69,7 +69,7 @@ SELECT * FROM nats_scan('telemetry',
 .print Expected: Error message
 .print ========================================
 
-SELECT * FROM nats_scan('telemetry', 
+SELECT * FROM nats_scan('telemetry_proto', 
     proto_file := 'test/proto/telemetry.proto',
     proto_message := 'Telemetry',
     proto_extract := ['device_id.something']
@@ -81,7 +81,7 @@ SELECT * FROM nats_scan('telemetry',
 .print Expected: Error message
 .print ========================================
 
-SELECT * FROM nats_scan('telemetry', 
+SELECT * FROM nats_scan('telemetry_proto', 
     proto_file := 'test/proto/telemetry.proto',
     proto_message := 'Telemetry',
     proto_extract := ['location.nonexistent']
@@ -93,7 +93,7 @@ SELECT * FROM nats_scan('telemetry',
 .print Expected: Error message
 .print ========================================
 
-SELECT * FROM nats_scan('telemetry', 
+SELECT * FROM nats_scan('telemetry_proto', 
     json_extract := ['device_id'],
     proto_file := 'test/proto/telemetry.proto',
     proto_message := 'Telemetry',

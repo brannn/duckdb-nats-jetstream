@@ -16,11 +16,11 @@ SELECT
     subject,
     device_id,
     location_zone
-FROM nats_scan('telemetry',
+FROM nats_scan('telemetry_proto',
     proto_file := 'test/proto/telemetry.proto',
     proto_message := 'Telemetry',
     proto_extract := ['device_id', 'location.zone'],
-    subject := 'telemetry.dc1.power.pm5560.pm5560-001'
+    subject := 'telemetry_proto.dc1.power.pm5560.pm5560-001'
 )
 LIMIT 10;
 
@@ -32,7 +32,7 @@ LIMIT 10;
 SELECT DISTINCT
     subject,
     COUNT(*) as message_count
-FROM nats_scan('telemetry',
+FROM nats_scan('telemetry_proto',
     proto_file := 'test/proto/telemetry.proto',
     proto_message := 'Telemetry',
     proto_extract := ['device_id'],
@@ -50,7 +50,7 @@ SELECT
     subject,
     device_id,
     COUNT(*) as readings
-FROM nats_scan('telemetry',
+FROM nats_scan('telemetry_proto',
     proto_file := 'test/proto/telemetry.proto',
     proto_message := 'Telemetry',
     proto_extract := ['device_id'],
@@ -66,7 +66,7 @@ LIMIT 10;
 .print ========================================
 
 SELECT COUNT(*) as no_match_count
-FROM nats_scan('telemetry',
+FROM nats_scan('telemetry_proto',
     proto_file := 'test/proto/telemetry.proto',
     proto_message := 'Telemetry',
     proto_extract := ['device_id'],
@@ -82,7 +82,7 @@ SELECT
     seq,
     subject,
     device_id
-FROM nats_scan('telemetry',
+FROM nats_scan('telemetry_proto',
     proto_file := 'test/proto/telemetry.proto',
     proto_message := 'Telemetry',
     proto_extract := ['device_id'],
@@ -102,11 +102,13 @@ SELECT
     COUNT(*) as filtered_count,
     MIN(ts_nats) as first,
     MAX(ts_nats) as last
-FROM nats_scan('telemetry',
+FROM nats_scan('telemetry_proto',
+    proto_file := 'test/proto/telemetry.proto',
+    proto_message := 'Telemetry',
+    proto_extract := ['device_id'],
     subject := 'pm5560-001',
     start_time := (current_timestamp - INTERVAL '3 hours')::TIMESTAMP,
-    end_time := (current_timestamp - INTERVAL '2 hours')::TIMESTAMP,
-    json_extract := ['device_id']
+    end_time := (current_timestamp - INTERVAL '2 hours')::TIMESTAMP
 );
 
 .print
@@ -119,7 +121,7 @@ SELECT
     COUNT(*) as message_count,
     MIN(seq) as first_seq,
     MAX(seq) as last_seq
-FROM nats_scan('telemetry',
+FROM nats_scan('telemetry_proto',
     proto_file := 'test/proto/telemetry.proto',
     proto_message := 'Telemetry',
     proto_extract := ['device_id']
@@ -137,7 +139,7 @@ SELECT
     subject,
     device_id,
     location_zone
-FROM nats_scan('telemetry',
+FROM nats_scan('telemetry_proto',
     proto_file := 'test/proto/telemetry.proto',
     proto_message := 'Telemetry',
     proto_extract := ['device_id', 'location.zone']
@@ -147,16 +149,18 @@ LIMIT 10;
 
 .print
 .print ========================================
-.print Test 9: Subject filter with JSON extraction
+.print Test 9: Subject filter with protobuf extraction
 .print ========================================
 
 SELECT
     subject,
     device_id,
-    zone,
-    kw::DOUBLE as kw
-FROM nats_scan('telemetry',
-    json_extract := ['device_id', 'zone', 'kw'],
+    location_zone as zone,
+    metrics_kw as kw
+FROM nats_scan('telemetry_proto',
+    proto_file := 'test/proto/telemetry.proto',
+    proto_message := 'Telemetry',
+    proto_extract := ['device_id', 'location.zone', 'metrics.kw'],
     subject := 'dc1'
 )
 LIMIT 10;
@@ -188,7 +192,7 @@ SELECT
     ROUND(AVG(metrics_kw), 2) as avg_kw,
     ROUND(MIN(metrics_kw), 2) as min_kw,
     ROUND(MAX(metrics_kw), 2) as max_kw
-FROM nats_scan('telemetry',
+FROM nats_scan('telemetry_proto',
     proto_file := 'test/proto/telemetry.proto',
     proto_message := 'Telemetry',
     proto_extract := ['metrics.kw'],
@@ -206,7 +210,7 @@ SELECT
     COUNT(*) as total_filtered,
     COUNT(DISTINCT subject) as unique_subjects,
     COUNT(DISTINCT device_id) as unique_devices
-FROM nats_scan('telemetry',
+FROM nats_scan('telemetry_proto',
     proto_file := 'test/proto/telemetry.proto',
     proto_message := 'Telemetry',
     proto_extract := ['device_id'],

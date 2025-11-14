@@ -40,6 +40,23 @@ nats stream add environmental \
 
 echo "Created stream: environmental"
 
+# Create telemetry_proto stream for protobuf test data
+nats stream add telemetry_proto \
+  --subjects "telemetry_proto.>" \
+  --storage file \
+  --retention limits \
+  --max-msgs=-1 \
+  --max-bytes=-1 \
+  --max-age=7d \
+  --max-msg-size=1048576 \
+  --discard old \
+  --dupe-window=2m \
+  --replicas=1 \
+  --server="${NATS_URL}" \
+  --defaults
+
+echo "Created stream: telemetry_proto"
+
 # Create events stream for audit/system events
 nats stream add events \
   --subjects "events.>" \

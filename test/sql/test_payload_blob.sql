@@ -37,7 +37,7 @@ SELECT
     device_id,
     typeof(payload) as payload_type,
     octet_length(payload) as payload_size
-FROM nats_scan('telemetry',
+FROM nats_scan('telemetry_proto',
     proto_file := 'test/proto/telemetry.proto',
     proto_message := 'Telemetry',
     proto_extract := ['device_id'])
