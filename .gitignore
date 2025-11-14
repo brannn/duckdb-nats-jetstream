@@ -54,6 +54,7 @@ deps/
 # Test artifacts
 test_results/
 *.log
+test/TEST_COVERAGE_SUMMARY.md
 
 # Docker
 .docker/
