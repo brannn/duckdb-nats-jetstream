@@ -1,7 +1,7 @@
 # DuckDB NATS JetStream Extension
 
 [![CI](https://github.com/brannn/duckdb-nats-jetstream/actions/workflows/MainDistributionPipeline.yml/badge.svg)](https://github.com/brannn/duckdb-nats-jetstream/actions/workflows/MainDistributionPipeline.yml)
-[![Version](https://img.shields.io/badge/Version-v0.1.0-orange)](https://github.com/brannn/duckdb-nats-jetstream/releases/tag/v0.1.0)
+[![Version](https://img.shields.io/badge/Version-v0.1.1-orange)](https://github.com/brannn/duckdb-nats-jetstream/releases/tag/v0.1.1)
 [![DuckDB Version](https://img.shields.io/badge/DuckDB-v1.4.2-blue)](https://github.com/duckdb/duckdb/releases/tag/v1.4.2)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows%20%7C%20WebAssembly-lightgrey)](https://github.com/brannn/duckdb-nats-jetstream/actions)
