@@ -17,7 +17,7 @@ SELECT
     timestamp,
     online,
     firmware_version
-FROM nats_scan('telemetry', 
+FROM nats_scan('telemetry_proto', 
     proto_file := 'test/proto/telemetry.proto',
     proto_message := 'Telemetry',
     proto_extract := ['device_id', 'timestamp', 'online', 'firmware_version']
@@ -35,7 +35,7 @@ SELECT
     location_zone,
     location_rack,
     location_building
-FROM nats_scan('telemetry', 
+FROM nats_scan('telemetry_proto', 
     proto_file := 'test/proto/telemetry.proto',
     proto_message := 'Telemetry',
     proto_extract := ['device_id', 'location.zone', 'location.rack', 'location.building']
@@ -55,7 +55,7 @@ SELECT
     metrics_voltage,
     metrics_current,
     metrics_frequency
-FROM nats_scan('telemetry', 
+FROM nats_scan('telemetry_proto', 
     proto_file := 'test/proto/telemetry.proto',
     proto_message := 'Telemetry',
     proto_extract := [
@@ -80,7 +80,7 @@ SELECT
     location_zone,
     metrics_kw,
     online
-FROM nats_scan('telemetry', 
+FROM nats_scan('telemetry_proto', 
     proto_file := 'test/proto/telemetry.proto',
     proto_message := 'Telemetry',
     proto_extract := [
@@ -102,7 +102,7 @@ SELECT
     seq,
     typeof(payload) as payload_type,
     octet_length(payload) as payload_size
-FROM nats_scan('telemetry',
+FROM nats_scan('telemetry_proto',
     proto_file := 'test/proto/telemetry.proto',
     proto_message := 'Telemetry',
     proto_extract := ['device_id']
@@ -121,7 +121,7 @@ SELECT
     ROUND(MIN(metrics_kw), 2) as min_kw,
     ROUND(MAX(metrics_kw), 2) as max_kw,
     ROUND(AVG(metrics_voltage), 2) as avg_voltage
-FROM nats_scan('telemetry', 
+FROM nats_scan('telemetry_proto', 
     proto_file := 'test/proto/telemetry.proto',
     proto_message := 'Telemetry',
     proto_extract := ['device_id', 'metrics.kw', 'metrics.voltage']
@@ -139,7 +139,7 @@ SELECT
     location_zone,
     location_rack,
     metrics_kw
-FROM nats_scan('telemetry', 
+FROM nats_scan('telemetry_proto', 
     proto_file := 'test/proto/telemetry.proto',
     proto_message := 'Telemetry',
     proto_extract := ['device_id', 'location.zone', 'location.rack', 'metrics.kw']
@@ -156,7 +156,7 @@ SELECT
     device_id,
     metrics_kw,
     metrics_voltage
-FROM nats_scan('telemetry', 
+FROM nats_scan('telemetry_proto', 
     proto_file := 'test/proto/telemetry.proto',
     proto_message := 'Telemetry',
     proto_extract := ['device_id', 'metrics.kw', 'metrics.voltage']
@@ -173,7 +173,7 @@ SELECT
     device_id,
     online,
     firmware_version
-FROM nats_scan('telemetry', 
+FROM nats_scan('telemetry_proto', 
     proto_file := 'test/proto/telemetry.proto',
     proto_message := 'Telemetry',
     proto_extract := ['device_id', 'online', 'firmware_version']
@@ -192,7 +192,7 @@ SELECT
     metrics_kw,
     metrics_voltage,
     online
-FROM nats_scan('telemetry', 
+FROM nats_scan('telemetry_proto', 
     proto_file := 'test/proto/telemetry.proto',
     proto_message := 'Telemetry',
     proto_extract := ['device_id', 'location.zone', 'metrics.kw', 'metrics.voltage', 'online']
@@ -211,7 +211,7 @@ SELECT
     seq,
     device_id,
     metrics_kw
-FROM nats_scan('telemetry', 
+FROM nats_scan('telemetry_proto', 
     proto_file := 'test/proto/telemetry.proto',
     proto_message := 'Telemetry',
     proto_extract := ['device_id', 'metrics.kw'],
@@ -229,7 +229,7 @@ SELECT
     subject,
     device_id,
     location_zone
-FROM nats_scan('telemetry',
+FROM nats_scan('telemetry_proto',
     proto_file := 'test/proto/telemetry.proto',
     proto_message := 'Telemetry',
     proto_extract := ['device_id', 'location.zone'],
@@ -243,7 +243,7 @@ LIMIT 10;
 .print ========================================
 
 SELECT COUNT(*) as total_messages
-FROM nats_scan('telemetry', 
+FROM nats_scan('telemetry_proto', 
     proto_file := 'test/proto/telemetry.proto',
     proto_message := 'Telemetry',
     proto_extract := ['device_id']
@@ -258,7 +258,7 @@ SELECT
     location_zone,
     COUNT(*) as message_count,
     ROUND(AVG(metrics_kw), 2) as avg_kw
-FROM nats_scan('telemetry', 
+FROM nats_scan('telemetry_proto', 
     proto_file := 'test/proto/telemetry.proto',
     proto_message := 'Telemetry',
     proto_extract := ['location.zone', 'metrics.kw']
