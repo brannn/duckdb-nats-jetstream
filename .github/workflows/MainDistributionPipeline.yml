@@ -40,7 +40,7 @@ jobs:
 
       - name: Setup DuckDB
         run: |
-          wget https://github.com/duckdb/duckdb/releases/download/v1.4.2/duckdb_cli-linux-amd64.zip
+          wget https://github.com/duckdb/duckdb/releases/download/v1.5.1/duckdb_cli-linux-amd64.zip
           unzip duckdb_cli-linux-amd64.zip
           chmod +x duckdb
           sudo mv duckdb /usr/local/bin/
@@ -67,10 +67,10 @@ jobs:
   duckdb-stable-build:
     name: Build extension binaries
     needs: test
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v1.4.1
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v1.5.1
     with:
-      duckdb_version: v1.4.1
-      ci_tools_version: v1.4.1
+      duckdb_version: v1.5.1
+      ci_tools_version: v1.5.1
       extension_name: nats_js
       # Exclude musl build due to vcpkg libsodium build failures
       exclude_archs: 'linux_amd64_musl'

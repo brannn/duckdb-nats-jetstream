@@ -5,7 +5,7 @@
 --
 -- Run with: duckdb -unsigned :memory: < test/sql/test_timestamp_queries.sql
 
-LOAD 'build/release/nats_js.duckdb_extension';
+LOAD 'build/release/extension/nats_js/nats_js.duckdb_extension';
 
 .print ========================================
 .print Test 1: Query with both start_time and end_time

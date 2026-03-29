@@ -44,7 +44,7 @@ echo -e "${GREEN}✓ All prerequisites met${NC}"
 echo ""
 
 # Check if extension is built
-if [ ! -f "$PROJECT_ROOT/build/release/nats_js.duckdb_extension" ]; then
+if [ ! -f "$PROJECT_ROOT/build/release/extension/nats_js/nats_js.duckdb_extension" ]; then
     echo -e "${YELLOW}Extension not found. Building...${NC}"
     cd "$PROJECT_ROOT"
     make release || {

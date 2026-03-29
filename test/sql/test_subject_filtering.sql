@@ -5,7 +5,7 @@
 --
 -- Run with: duckdb -unsigned :memory: < test/sql/test_subject_filtering.sql
 
-LOAD 'build/release/nats_js.duckdb_extension';
+LOAD 'build/release/extension/nats_js/nats_js.duckdb_extension';
 
 .print ========================================
 .print Test 1: Exact subject match (from test_protobuf.sql)
