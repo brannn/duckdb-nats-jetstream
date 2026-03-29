@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           submodules: 'true'
           fetch-depth: 0
@@ -33,7 +33,7 @@ jobs:
           sudo mv nats /usr/local/bin/
 
       - name: Start NATS server
-        run: docker-compose up -d
+        run: docker compose up -d
 
       - name: Wait for NATS to be ready
         run: sleep 10
@@ -55,14 +55,14 @@ jobs:
 
       - name: Upload test logs on failure
         if: failure()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: test-logs
           path: /tmp/nats_test_*.log
 
       - name: Cleanup
         if: always()
-        run: docker-compose down
+        run: docker compose down
 
   duckdb-stable-build:
     name: Build extension binaries
