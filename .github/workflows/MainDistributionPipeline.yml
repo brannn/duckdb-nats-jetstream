@@ -45,8 +45,11 @@ jobs:
           chmod +x /tmp/duckdb_cli/duckdb
           sudo mv /tmp/duckdb_cli/duckdb /usr/local/bin/
 
+      - name: Setup vcpkg
+        run: make setup-vcpkg
+
       - name: Build extension
-        run: make release
+        run: VCPKG_TOOLCHAIN_PATH=$(pwd)/vcpkg/scripts/buildsystems/vcpkg.cmake make release
 
       - name: Run test suite
         run: |
