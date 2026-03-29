@@ -46,7 +46,9 @@ jobs:
           sudo mv /tmp/duckdb_cli/duckdb /usr/local/bin/
 
       - name: Setup vcpkg
-        run: make setup-vcpkg
+        run: |
+          git clone --depth 1 --branch 2025.12.12 https://github.com/microsoft/vcpkg
+          cd vcpkg && ./bootstrap-vcpkg.sh
 
       - name: Build extension
         run: VCPKG_TOOLCHAIN_PATH=$(pwd)/vcpkg/scripts/buildsystems/vcpkg.cmake make release
