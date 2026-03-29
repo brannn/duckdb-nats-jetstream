@@ -25,8 +25,8 @@ echo ""
 # Check prerequisites
 echo -e "${YELLOW}Checking prerequisites...${NC}"
 
-command -v docker-compose >/dev/null 2>&1 || {
-    echo -e "${RED}Error: docker-compose is required but not installed${NC}"
+docker compose version >/dev/null 2>&1 || {
+    echo -e "${RED}Error: docker compose is required but not installed${NC}"
     exit 1
 }
 
@@ -60,7 +60,7 @@ echo ""
 # Start NATS server
 echo -e "${YELLOW}Starting NATS server...${NC}"
 cd "$PROJECT_ROOT"
-docker-compose up -d
+docker compose up -d
 
 # Wait for NATS to be ready
 echo -e "${YELLOW}Waiting for NATS server to be ready...${NC}"
@@ -90,7 +90,7 @@ async def check():
 sys.exit(asyncio.run(check()))
 " || {
     echo -e "${RED}Error: NATS server not ready${NC}"
-    docker-compose down
+    docker compose down
     exit 1
 }
 
@@ -184,7 +184,7 @@ done
 # Cleanup
 echo ""
 echo -e "${YELLOW}Cleaning up...${NC}"
-docker-compose down > /dev/null 2>&1
+docker compose down > /dev/null 2>&1
 echo -e "${GREEN}✓ Cleanup complete${NC}"
 
 # Summary
