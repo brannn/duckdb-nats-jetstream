@@ -5,7 +5,6 @@
 namespace duckdb {
 
 void NatsJsExtension::Load(ExtensionLoader &loader) {
-    // Register table functions
     NatsScanFunction::Register(loader);
 }
 
@@ -14,12 +13,11 @@ std::string NatsJsExtension::Name() {
 }
 
 std::string NatsJsExtension::Version() const {
-    return "0.2.0";
+    return "0.2.1";
 }
 
 } // namespace duckdb
 
-// Extension entry point
 extern "C" {
 
 DUCKDB_EXTENSION_API void nats_js_duckdb_cpp_init(duckdb::ExtensionLoader &loader) {

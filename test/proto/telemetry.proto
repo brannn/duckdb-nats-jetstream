@@ -27,5 +27,6 @@ message Telemetry {
   Metrics metrics = 4;        // Nested metrics
   bool online = 5;
   string firmware_version = 6;
+  repeated string tags = 7;
 }
 

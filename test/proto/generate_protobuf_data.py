@@ -67,7 +67,13 @@ async def generate_and_publish():
             msg.metrics.voltage = round(480.0 + random.uniform(-5, 5), 2)
             msg.metrics.current = round(msg.metrics.kva * 1000 / (msg.metrics.voltage * 1.732), 2)
             msg.metrics.frequency = round(60.0 + random.uniform(-0.1, 0.1), 2)
-            
+
+            # Set tags (repeated field)
+            msg.tags.append("power")
+            msg.tags.append(device["zone"])
+            if msg.online:
+                msg.tags.append("active")
+
             # Serialize to binary
             binary_data = msg.SerializeToString()
             
