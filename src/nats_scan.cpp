@@ -3,6 +3,7 @@
 #include "duckdb/parser/parsed_data/create_table_function_info.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/common/types/timestamp.hpp"
+#include "duckdb/common/types/vector.hpp"
 #include "yyjson.hpp"
 #include <nats/nats.h>
 #include <google/protobuf/compiler/importer.h>
@@ -608,11 +609,18 @@ static void NatsScanExecute(ClientContext &context, TableFunctionInput &data_p, 
     idx_t count = 0;
     const idx_t max_rows = STANDARD_VECTOR_SIZE;
 
-    // Allocate protobuf message once for the chunk, reuse via Clear()
     unique_ptr<Message> proto_msg;
     if (!bind_data.proto_fields.empty() && global_state.proto_prototype != nullptr) {
         proto_msg.reset(global_state.proto_prototype->New());
     }
+
+    // Get vector references for direct writes (avoids per-cell virtual dispatch via SetValue)
+    auto stream_data = FlatVector::GetData<string_t>(output.data[0]);
+    auto subject_data = FlatVector::GetData<string_t>(output.data[1]);
+    auto seq_data = FlatVector::GetData<uint64_t>(output.data[2]);
+    auto ts_data = FlatVector::GetData<timestamp_t>(output.data[3]);
+    auto payload_data = FlatVector::GetData<string_t>(output.data[4]);
+    bool payload_is_blob = !bind_data.proto_fields.empty() || bind_data.json_fields.empty();
 
     while (count < max_rows && global_state.current_seq <= global_state.end_seq) {
         if (context.interrupted) {
@@ -650,16 +658,15 @@ static void NatsScanExecute(ClientContext &context, TableFunctionInput &data_p, 
         const char *data = natsMsg_GetData(msg);
         int data_len = natsMsg_GetDataLength(msg);
 
-        output.SetValue(0, count, Value(bind_data.stream_name));
-        output.SetValue(1, count, Value(subject));
-        output.SetValue(2, count, Value::UBIGINT(global_state.current_seq));
-        output.SetValue(3, count, Value::TIMESTAMP(timestamp_t(timestamp_us)));
+        stream_data[count] = StringVector::AddString(output.data[0], bind_data.stream_name);
+        subject_data[count] = StringVector::AddString(output.data[1], subject);
+        seq_data[count] = global_state.current_seq;
+        ts_data[count] = timestamp_t(timestamp_us);
 
-        // BLOB unless json_extract (known UTF-8)
-        if (!bind_data.proto_fields.empty() || bind_data.json_fields.empty()) {
-            output.SetValue(4, count, Value::BLOB(const_data_ptr_cast(data), data_len));
+        if (payload_is_blob) {
+            payload_data[count] = StringVector::AddStringOrBlob(output.data[4], data, data_len);
         } else {
-            output.SetValue(4, count, Value(string(data, data_len)));
+            payload_data[count] = StringVector::AddString(output.data[4], data, data_len);
         }
 
         if (!bind_data.json_fields.empty()) {
@@ -670,36 +677,38 @@ static void NatsScanExecute(ClientContext &context, TableFunctionInput &data_p, 
 
                 for (size_t i = 0; i < bind_data.json_fields.size(); i++) {
                     idx_t col_idx = 5 + i;
+                    auto &vec = output.data[col_idx];
+                    auto vec_data = FlatVector::GetData<string_t>(vec);
                     yyjson_val *field_val = yyjson_obj_get(root, bind_data.json_fields[i].c_str());
 
                     if (field_val) {
                         if (yyjson_is_str(field_val)) {
-                            output.SetValue(col_idx, count, Value(yyjson_get_str(field_val)));
+                            vec_data[count] = StringVector::AddString(vec, yyjson_get_str(field_val));
                         } else if (yyjson_is_num(field_val)) {
-                            output.SetValue(col_idx, count, Value(std::to_string(yyjson_get_num(field_val))));
+                            auto s = std::to_string(yyjson_get_num(field_val));
+                            vec_data[count] = StringVector::AddString(vec, s);
                         } else if (yyjson_is_bool(field_val)) {
-                            output.SetValue(col_idx, count, Value(yyjson_get_bool(field_val) ? "true" : "false"));
+                            vec_data[count] = StringVector::AddString(vec, yyjson_get_bool(field_val) ? "true" : "false");
                         } else if (yyjson_is_null(field_val)) {
-                            output.SetValue(col_idx, count, Value());
+                            FlatVector::SetNull(vec, count, true);
                         } else {
                             char *json_str = yyjson_val_write(field_val, 0, nullptr);
                             if (json_str) {
-                                output.SetValue(col_idx, count, Value(json_str));
+                                vec_data[count] = StringVector::AddString(vec, json_str);
                                 free(json_str);
                             } else {
-                                output.SetValue(col_idx, count, Value());
+                                FlatVector::SetNull(vec, count, true);
                             }
                         }
                     } else {
-                        output.SetValue(col_idx, count, Value());
+                        FlatVector::SetNull(vec, count, true);
                     }
                 }
 
                 yyjson_doc_free(doc);
             } else {
                 for (size_t i = 0; i < bind_data.json_fields.size(); i++) {
-                    idx_t col_idx = 5 + i;
-                    output.SetValue(col_idx, count, Value());
+                    FlatVector::SetNull(output.data[5 + i], count, true);
                 }
             }
         }
@@ -716,8 +725,7 @@ static void NatsScanExecute(ClientContext &context, TableFunctionInput &data_p, 
                 }
             } else {
                 for (size_t i = 0; i < bind_data.proto_fields.size(); i++) {
-                    idx_t col_idx = 5 + i;
-                    output.SetValue(col_idx, count, Value());
+                    FlatVector::SetNull(output.data[5 + i], count, true);
                 }
             }
         }
