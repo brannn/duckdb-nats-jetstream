@@ -125,6 +125,10 @@ static const FieldDescriptor* GetFieldDescriptorForPath(const Descriptor* messag
 
 // Helper function to map protobuf field type to DuckDB LogicalType
 static LogicalType ProtobufTypeToDuckDBType(const FieldDescriptor* field) {
+    // Repeated fields are serialized as JSON arrays
+    if (field->is_repeated()) {
+        return LogicalType(LogicalTypeId::VARCHAR);
+    }
     switch (field->type()) {
         case FieldDescriptor::TYPE_STRING:
             return LogicalType(LogicalTypeId::VARCHAR);
@@ -522,6 +526,58 @@ static Value ExtractProtobufValue(const Message* message, const string& field_pa
             current_desc = field->message_type();
             reflection = current_message->GetReflection();
         } else {
+            // Repeated fields: serialize as JSON array
+            if (field->is_repeated()) {
+                int count = reflection->FieldSize(*current_message, field);
+                if (count == 0) {
+                    return Value("[]");
+                }
+                string result = "[";
+                for (int j = 0; j < count; j++) {
+                    if (j > 0) result += ",";
+                    switch (field->type()) {
+                        case FieldDescriptor::TYPE_STRING:
+                            result += "\"" + reflection->GetRepeatedString(*current_message, field, j) + "\"";
+                            break;
+                        case FieldDescriptor::TYPE_INT32:
+                        case FieldDescriptor::TYPE_SINT32:
+                        case FieldDescriptor::TYPE_SFIXED32:
+                            result += std::to_string(reflection->GetRepeatedInt32(*current_message, field, j));
+                            break;
+                        case FieldDescriptor::TYPE_INT64:
+                        case FieldDescriptor::TYPE_SINT64:
+                        case FieldDescriptor::TYPE_SFIXED64:
+                            result += std::to_string(reflection->GetRepeatedInt64(*current_message, field, j));
+                            break;
+                        case FieldDescriptor::TYPE_UINT32:
+                        case FieldDescriptor::TYPE_FIXED32:
+                            result += std::to_string(reflection->GetRepeatedUInt32(*current_message, field, j));
+                            break;
+                        case FieldDescriptor::TYPE_UINT64:
+                        case FieldDescriptor::TYPE_FIXED64:
+                            result += std::to_string(reflection->GetRepeatedUInt64(*current_message, field, j));
+                            break;
+                        case FieldDescriptor::TYPE_FLOAT:
+                            result += std::to_string(reflection->GetRepeatedFloat(*current_message, field, j));
+                            break;
+                        case FieldDescriptor::TYPE_DOUBLE:
+                            result += std::to_string(reflection->GetRepeatedDouble(*current_message, field, j));
+                            break;
+                        case FieldDescriptor::TYPE_BOOL:
+                            result += reflection->GetRepeatedBool(*current_message, field, j) ? "true" : "false";
+                            break;
+                        case FieldDescriptor::TYPE_ENUM:
+                            result += "\"" + string(reflection->GetRepeatedEnum(*current_message, field, j)->name()) + "\"";
+                            break;
+                        default:
+                            result += "null";
+                            break;
+                    }
+                }
+                result += "]";
+                return Value(result);
+            }
+
             // proto3 primitives always have defaults; only check message fields for presence
             if (!reflection->HasField(*current_message, field) && field->type() == FieldDescriptor::TYPE_MESSAGE) {
                 return Value();
@@ -559,10 +615,9 @@ static Value ExtractProtobufValue(const Message* message, const string& field_pa
                     return Value(string(enum_val->name()));
                 }
                 case FieldDescriptor::TYPE_MESSAGE:
-                    // Nested messages should have been extracted as separate fields
                     return Value();
                 default:
-                    return Value();  // Unknown type - return NULL
+                    return Value();
             }
         }
     }
