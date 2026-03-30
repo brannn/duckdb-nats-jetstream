@@ -169,7 +169,6 @@ struct NatsScanGlobalState : public GlobalTableFunctionState {
     uint64_t current_seq = 0;
     uint64_t end_seq = 0;
     bool done = false;
-    bool timestamps_resolved = false;
 
     shared_ptr<DynamicMessageFactory> proto_factory;
     const Message* proto_prototype = nullptr;
@@ -370,18 +369,125 @@ static unique_ptr<FunctionData> NatsScanBind(ClientContext &context, TableFuncti
     return bind_data;
 }
 
+// Binary search for the first sequence at or after the given timestamp.
+static uint64_t ResolveTimestampToSequence(jsCtx *js, const char *stream_name,
+                                           int64_t timestamp_ns,
+                                           uint64_t first_seq, uint64_t last_seq) {
+    natsStatus s;
+    uint64_t left = first_seq;
+    uint64_t right = last_seq;
+    uint64_t result_seq = UINT64_MAX;
+
+    while (left <= right) {
+        uint64_t mid = left + (right - left) / 2;
+
+        natsMsg *msg = nullptr;
+        jsDirectGetMsgOptions opts;
+        memset(&opts, 0, sizeof(opts));
+        opts.Sequence = mid;
+
+        s = js_DirectGetMsg(&msg, js, stream_name, nullptr, &opts);
+
+        if (s == NATS_NOT_FOUND) {
+            left = mid + 1;
+            continue;
+        }
+
+        if (s != NATS_OK) {
+            throw std::runtime_error(std::string("Failed to fetch message at sequence ") +
+                                   std::to_string(mid) + " for timestamp resolution: " + natsStatus_GetText(s));
+        }
+
+        int64_t msg_time_ns = natsMsg_GetTime(msg);
+        natsMsg_Destroy(msg);
+
+        if (msg_time_ns >= timestamp_ns) {
+            result_seq = mid;
+            right = mid - 1;
+        } else {
+            left = mid + 1;
+        }
+    }
+
+    return result_seq;
+}
+
 static unique_ptr<GlobalTableFunctionState> NatsScanInitGlobal(ClientContext &context,
                                                                  TableFunctionInitInput &input) {
     auto &bind_data = input.bind_data->Cast<NatsScanBindData>();
     auto state = make_uniq<NatsScanGlobalState>();
 
     state->current_seq = bind_data.start_seq > 0 ? bind_data.start_seq : 1;
-    state->end_seq = bind_data.end_seq; // UINT64_MAX resolved to stream LastSeq at execute time
+    state->end_seq = bind_data.end_seq;
     state->done = false;
 
     if (!bind_data.proto_fields.empty() && bind_data.proto_descriptor != nullptr) {
         state->proto_factory = make_shared_ptr<DynamicMessageFactory>();
         state->proto_prototype = state->proto_factory->GetPrototype(bind_data.proto_descriptor);
+    }
+
+    // Connect to NATS and validate stream at init time (fail-fast on typos / unreachable server)
+    natsOptions *opts = nullptr;
+    natsStatus s = natsOptions_Create(&opts);
+    if (s != NATS_OK) {
+        throw std::runtime_error(std::string("Failed to create NATS options: ") + natsStatus_GetText(s));
+    }
+
+    s = natsOptions_SetTimeout(opts, 5000);
+    if (s != NATS_OK) {
+        natsOptions_Destroy(opts);
+        throw std::runtime_error(std::string("Failed to set NATS timeout: ") + natsStatus_GetText(s));
+    }
+
+    s = natsOptions_SetURL(opts, bind_data.nats_url.c_str());
+    if (s != NATS_OK) {
+        natsOptions_Destroy(opts);
+        throw std::runtime_error(std::string("Failed to set NATS URL: ") + natsStatus_GetText(s));
+    }
+
+    s = natsConnection_Connect(&state->conn, opts);
+    natsOptions_Destroy(opts);
+    if (s != NATS_OK) {
+        throw std::runtime_error(std::string("Failed to connect to NATS: ") + natsStatus_GetText(s));
+    }
+
+    s = natsConnection_JetStream(&state->js, state->conn, nullptr);
+    if (s != NATS_OK) {
+        throw std::runtime_error(std::string("Failed to create JetStream context: ") + natsStatus_GetText(s));
+    }
+
+    s = js_GetStreamInfo(&state->stream_info, state->js, bind_data.stream_name.c_str(), nullptr, nullptr);
+    if (s != NATS_OK) {
+        throw std::runtime_error(std::string("Failed to get stream info for '") + bind_data.stream_name + "': " + natsStatus_GetText(s));
+    }
+
+    if (state->end_seq == UINT64_MAX) {
+        state->end_seq = state->stream_info->State.LastSeq;
+    }
+
+    // Resolve timestamps to sequence numbers
+    if (bind_data.start_time > 0 || bind_data.end_time > 0) {
+        if (bind_data.start_time > 0) {
+            uint64_t resolved_seq = ResolveTimestampToSequence(
+                state->js, bind_data.stream_name.c_str(), bind_data.start_time,
+                state->stream_info->State.FirstSeq, state->stream_info->State.LastSeq
+            );
+            if (resolved_seq == UINT64_MAX) {
+                state->done = true;
+                return state;
+            }
+            state->current_seq = resolved_seq;
+        }
+
+        if (bind_data.end_time > 0) {
+            uint64_t resolved_seq = ResolveTimestampToSequence(
+                state->js, bind_data.stream_name.c_str(), bind_data.end_time,
+                state->stream_info->State.FirstSeq, state->stream_info->State.LastSeq
+            );
+            if (resolved_seq != UINT64_MAX) {
+                state->end_seq = resolved_seq;
+            }
+        }
     }
 
     return state;
@@ -464,143 +570,11 @@ static Value ExtractProtobufValue(const Message* message, const string& field_pa
     return Value();  // Should not reach here
 }
 
-// Binary search for the first sequence at or after the given timestamp.
-static uint64_t ResolveTimestampToSequence(jsCtx *js, const char *stream_name,
-                                           int64_t timestamp_ns,
-                                           uint64_t first_seq, uint64_t last_seq) {
-    natsStatus s;
-    uint64_t left = first_seq;
-    uint64_t right = last_seq;
-    uint64_t result_seq = UINT64_MAX;
-
-    while (left <= right) {
-        uint64_t mid = left + (right - left) / 2;
-
-        natsMsg *msg = nullptr;
-        jsDirectGetMsgOptions opts;
-        memset(&opts, 0, sizeof(opts));
-        opts.Sequence = mid;
-
-        s = js_DirectGetMsg(&msg, js, stream_name, nullptr, &opts);
-
-        if (s == NATS_NOT_FOUND) {
-            left = mid + 1;
-            continue;
-        }
-
-        if (s != NATS_OK) {
-            throw std::runtime_error(std::string("Failed to fetch message at sequence ") +
-                                   std::to_string(mid) + " for timestamp resolution: " + natsStatus_GetText(s));
-        }
-
-        int64_t msg_time_ns = natsMsg_GetTime(msg);
-        natsMsg_Destroy(msg);
-
-        if (msg_time_ns >= timestamp_ns) {
-            result_seq = mid;
-            right = mid - 1;
-        } else {
-            left = mid + 1;
-        }
-    }
-
-    return result_seq;
-}
-
 static void NatsScanExecute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
     auto &bind_data = data_p.bind_data->Cast<NatsScanBindData>();
     auto &global_state = data_p.global_state->Cast<NatsScanGlobalState>();
 
-    if (global_state.done) {
-        output.SetCardinality(0);
-        return;
-    }
-
-    if (global_state.conn == nullptr) {
-        natsOptions *opts = nullptr;
-        natsStatus s = natsOptions_Create(&opts);
-        if (s != NATS_OK) {
-            throw std::runtime_error(std::string("Failed to create NATS options: ") + natsStatus_GetText(s));
-        }
-
-        s = natsOptions_SetTimeout(opts, 5000);
-        if (s != NATS_OK) {
-            natsOptions_Destroy(opts);
-            throw std::runtime_error(std::string("Failed to set NATS timeout: ") + natsStatus_GetText(s));
-        }
-
-        s = natsOptions_SetURL(opts, bind_data.nats_url.c_str());
-        if (s != NATS_OK) {
-            natsOptions_Destroy(opts);
-            throw std::runtime_error(std::string("Failed to set NATS URL: ") + natsStatus_GetText(s));
-        }
-
-        s = natsConnection_Connect(&global_state.conn, opts);
-        natsOptions_Destroy(opts);
-
-        if (s != NATS_OK) {
-            throw std::runtime_error(std::string("Failed to connect to NATS: ") + natsStatus_GetText(s));
-        }
-    }
-
-    if (global_state.js == nullptr) {
-        natsStatus s = natsConnection_JetStream(&global_state.js, global_state.conn, nullptr);
-
-        if (s != NATS_OK) {
-            throw std::runtime_error(std::string("Failed to create JetStream context: ") + natsStatus_GetText(s));
-        }
-
-        if (global_state.stream_info == nullptr) {
-            s = js_GetStreamInfo(&global_state.stream_info, global_state.js, bind_data.stream_name.c_str(), nullptr, nullptr);
-
-            if (s != NATS_OK) {
-                throw std::runtime_error(std::string("Failed to get stream info: ") + natsStatus_GetText(s));
-            }
-        }
-
-        if (global_state.end_seq == UINT64_MAX) {
-            global_state.end_seq = global_state.stream_info->State.LastSeq;
-        }
-    }
-
-    if (!global_state.timestamps_resolved && (bind_data.start_time > 0 || bind_data.end_time > 0)) {
-        if (bind_data.start_time > 0) {
-            uint64_t resolved_seq = ResolveTimestampToSequence(
-                global_state.js,
-                bind_data.stream_name.c_str(),
-                bind_data.start_time,
-                global_state.stream_info->State.FirstSeq,
-                global_state.stream_info->State.LastSeq
-            );
-
-            if (resolved_seq == UINT64_MAX) {
-                global_state.done = true;
-                global_state.timestamps_resolved = true;
-                output.SetCardinality(0);
-                return;
-            }
-
-            global_state.current_seq = resolved_seq;
-        }
-
-        if (bind_data.end_time > 0) {
-            uint64_t resolved_seq = ResolveTimestampToSequence(
-                global_state.js,
-                bind_data.stream_name.c_str(),
-                bind_data.end_time,
-                global_state.stream_info->State.FirstSeq,
-                global_state.stream_info->State.LastSeq
-            );
-
-            if (resolved_seq != UINT64_MAX) {
-                global_state.end_seq = resolved_seq;
-            }
-        }
-
-        global_state.timestamps_resolved = true;
-    }
-
-    if (global_state.current_seq > global_state.end_seq) {
+    if (global_state.done || global_state.current_seq > global_state.end_seq) {
         global_state.done = true;
         output.SetCardinality(0);
         return;
