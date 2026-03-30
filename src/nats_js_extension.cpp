@@ -13,7 +13,7 @@ std::string NatsJsExtension::Name() {
 }
 
 std::string NatsJsExtension::Version() const {
-    return "0.2.0";
+    return "0.2.1";
 }
 
 } // namespace duckdb

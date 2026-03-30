@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [0.2.1] - 2026-03-30
+
+### Added
+- Support for repeated protobuf fields, serialized as JSON arrays
+- Query cancellation support (Ctrl-C now interrupts long scans)
+
+### Changed
+- Deduplicate field path parsing into shared helper
+- Reuse protobuf Message allocation per chunk instead of per row
+- Replace per-cell SetValue with direct vector writes for envelope and JSON columns
+- Move NATS connection and stream validation to init time (fail-fast on invalid streams)
+- Remove dead code and redundant comments (-108 net lines)
+
 ## [0.2.0] - 2026-03-29
 
 ### Changed
