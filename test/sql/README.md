@@ -66,7 +66,7 @@ duckdb -unsigned :memory: < test/sql/test_protobuf_errors.sql
 ### Run specific test:
 ```bash
 duckdb -unsigned :memory: << 'EOF'
-LOAD 'build/release/nats_js.duckdb_extension';
+LOAD 'build/release/extension/nats_js/nats_js.duckdb_extension';
 
 SELECT device_id, metrics_kw
 FROM nats_scan('telemetry', 

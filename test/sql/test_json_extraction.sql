@@ -5,7 +5,7 @@
 --
 -- Run with: duckdb -unsigned :memory: < test/sql/test_json_extraction.sql
 
-LOAD 'build/release/nats_js.duckdb_extension';
+LOAD 'build/release/extension/nats_js/nats_js.duckdb_extension';
 
 .print ========================================
 .print Test 1: Basic string field extraction

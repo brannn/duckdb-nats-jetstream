@@ -67,12 +67,12 @@ Build the extension:
 make build
 ```
 
-The compiled extension will be located at `build/release/nats_js.duckdb_extension`.
+The compiled extension will be located at `build/release/extension/nats_js/nats_js.duckdb_extension`.
 
 **Loading the extension:**
 
 ```sql
-LOAD 'build/release/nats_js.duckdb_extension';
+LOAD 'build/release/extension/nats_js/nats_js.duckdb_extension';
 ```
 
 Note: When loading unsigned extensions, you may need to start DuckDB with the `-unsigned` flag:

@@ -5,7 +5,7 @@
 --
 -- Run with: duckdb -unsigned :memory: < test/sql/test_sequence_ranges.sql
 
-LOAD 'build/release/nats_js.duckdb_extension';
+LOAD 'build/release/extension/nats_js/nats_js.duckdb_extension';
 
 .print ========================================
 .print Test 1: Basic sequence range (already tested in test_protobuf.sql)
