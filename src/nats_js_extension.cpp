@@ -1,6 +1,6 @@
 #include "nats_js_extension.hpp"
 #include "nats_scan.hpp"
-#include <nats/nats.h>
+#include "duckdb/main/extension/extension_loader.hpp"
 
 namespace duckdb {
 
@@ -13,21 +13,20 @@ std::string NatsJsExtension::Name() {
 }
 
 std::string NatsJsExtension::Version() const {
-    return "0.2.1";
+#ifdef EXT_VERSION_NATS_JS
+    return EXT_VERSION_NATS_JS;
+#else
+    return "";
+#endif
 }
 
 } // namespace duckdb
 
 extern "C" {
 
-DUCKDB_EXTENSION_API void nats_js_duckdb_cpp_init(duckdb::ExtensionLoader &loader) {
+DUCKDB_CPP_EXTENSION_ENTRY(nats_js, loader) {
     duckdb::NatsJsExtension extension;
     extension.Load(loader);
 }
 
-DUCKDB_EXTENSION_API const char *nats_js_duckdb_cpp_version() {
-    return duckdb::DuckDB::LibraryVersion();
 }
-
-}
-

@@ -13,10 +13,14 @@ concurrency:
 jobs:
   duckdb-stable-build:
     name: Build extension binaries
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v1.5.1
+    # DuckDB's 2.0 release branch, not the v2.0.0 tag: the tests run on a prebuilt DuckDB when one is staged for the
+    # commit, and the one staged for v2.0.0 is a development build, which does not load an extension built at the tag
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v2.0-cyanoptera
     with:
-      duckdb_version: v1.5.1
-      ci_tools_version: v1.5.1
+      duckdb_version: v2.0-cyanoptera
+      ci_tools_version: v2.0-cyanoptera
       extension_name: nats_js
       exclude_archs: 'linux_amd64_musl;windows_amd64_mingw'
       reduced_ci_mode: 'disabled'
+      # fail, rather than skip, the tests when the extension does not load (see the Makefile)
+      test_config: '{"test_env_variables": {"NATS_JS_FAIL_SKIPPED_TESTS": "1"}}'

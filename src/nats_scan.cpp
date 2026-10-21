@@ -201,7 +201,7 @@ struct NatsScanLocalState : public LocalTableFunctionState {
 };
 
 static unique_ptr<FunctionData> NatsScanBind(ClientContext &context, TableFunctionBindInput &input,
-                                              vector<LogicalType> &return_types, vector<string> &names) {
+                                              vector<LogicalType> &return_types, vector<Identifier> &names) {
     if (input.inputs.empty()) {
         throw std::runtime_error("nats_scan requires at least one argument: stream_name");
     }
@@ -631,7 +631,7 @@ static void NatsScanExecute(ClientContext &context, TableFunctionInput &data_p, 
 
     if (global_state.done || global_state.current_seq > global_state.end_seq) {
         global_state.done = true;
-        output.SetCardinality(0);
+        output.SetChildCardinality(0);
         return;
     }
 
@@ -643,16 +643,20 @@ static void NatsScanExecute(ClientContext &context, TableFunctionInput &data_p, 
         proto_msg.reset(global_state.proto_prototype->New());
     }
 
-    // Get vector references for direct writes (avoids per-cell virtual dispatch via SetValue)
-    auto stream_data = FlatVector::GetData<string_t>(output.data[0]);
-    auto subject_data = FlatVector::GetData<string_t>(output.data[1]);
-    auto seq_data = FlatVector::GetData<uint64_t>(output.data[2]);
-    auto ts_data = FlatVector::GetData<timestamp_t>(output.data[3]);
-    auto payload_data = FlatVector::GetData<string_t>(output.data[4]);
-    bool payload_is_blob = !bind_data.proto_fields.empty() || bind_data.json_fields.empty();
+    // Direct writes (avoids per-cell virtual dispatch via SetValue)
+    auto stream_data = FlatVector::ScatterWriter<string_t>(output.data[0]);
+    auto subject_data = FlatVector::ScatterWriter<string_t>(output.data[1]);
+    auto seq_data = FlatVector::ScatterWriter<uint64_t>(output.data[2]);
+    auto ts_data = FlatVector::ScatterWriter<timestamp_t>(output.data[3]);
+    auto payload_data = FlatVector::ScatterWriter<string_t>(output.data[4]);
+    vector<VectorScatterWriter<string_t>> json_data;
+    json_data.reserve(bind_data.json_fields.size());
+    for (idx_t i = 0; i < bind_data.json_fields.size(); i++) {
+        json_data.push_back(FlatVector::ScatterWriter<string_t>(output.data[5 + i]));
+    }
 
     while (count < max_rows && global_state.current_seq <= global_state.end_seq) {
-        if (context.interrupted) {
+        if (context.IsInterrupted()) {
             break;
         }
 
@@ -687,16 +691,11 @@ static void NatsScanExecute(ClientContext &context, TableFunctionInput &data_p, 
         const char *data = natsMsg_GetData(msg);
         int data_len = natsMsg_GetDataLength(msg);
 
-        stream_data[count] = StringVector::AddString(output.data[0], bind_data.stream_name);
-        subject_data[count] = StringVector::AddString(output.data[1], subject);
+        stream_data[count] = string_t(bind_data.stream_name.c_str(), UnsafeNumericCast<uint32_t>(bind_data.stream_name.size()));
+        subject_data[count] = string_t(subject);
         seq_data[count] = global_state.current_seq;
         ts_data[count] = timestamp_t(timestamp_us);
-
-        if (payload_is_blob) {
-            payload_data[count] = StringVector::AddStringOrBlob(output.data[4], data, data_len);
-        } else {
-            payload_data[count] = StringVector::AddString(output.data[4], data, data_len);
-        }
+        payload_data[count] = string_t(data, UnsafeNumericCast<uint32_t>(data_len));
 
         if (!bind_data.json_fields.empty()) {
             yyjson_doc *doc = yyjson_read(data, data_len, 0);
@@ -705,39 +704,37 @@ static void NatsScanExecute(ClientContext &context, TableFunctionInput &data_p, 
                 yyjson_val *root = yyjson_doc_get_root(doc);
 
                 for (size_t i = 0; i < bind_data.json_fields.size(); i++) {
-                    idx_t col_idx = 5 + i;
-                    auto &vec = output.data[col_idx];
-                    auto vec_data = FlatVector::GetData<string_t>(vec);
+                    auto &vec_data = json_data[i];
                     yyjson_val *field_val = yyjson_obj_get(root, bind_data.json_fields[i].c_str());
 
                     if (field_val) {
                         if (yyjson_is_str(field_val)) {
-                            vec_data[count] = StringVector::AddString(vec, yyjson_get_str(field_val));
+                            vec_data[count] = string_t(yyjson_get_str(field_val));
                         } else if (yyjson_is_num(field_val)) {
                             auto s = std::to_string(yyjson_get_num(field_val));
-                            vec_data[count] = StringVector::AddString(vec, s);
+                            vec_data[count] = string_t(s.c_str(), UnsafeNumericCast<uint32_t>(s.size()));
                         } else if (yyjson_is_bool(field_val)) {
-                            vec_data[count] = StringVector::AddString(vec, yyjson_get_bool(field_val) ? "true" : "false");
+                            vec_data[count] = string_t(yyjson_get_bool(field_val) ? "true" : "false");
                         } else if (yyjson_is_null(field_val)) {
-                            FlatVector::SetNull(vec, count, true);
+                            vec_data.SetInvalid(count);
                         } else {
                             char *json_str = yyjson_val_write(field_val, 0, nullptr);
                             if (json_str) {
-                                vec_data[count] = StringVector::AddString(vec, json_str);
+                                vec_data[count] = string_t(json_str);
                                 free(json_str);
                             } else {
-                                FlatVector::SetNull(vec, count, true);
+                                vec_data.SetInvalid(count);
                             }
                         }
                     } else {
-                        FlatVector::SetNull(vec, count, true);
+                        vec_data.SetInvalid(count);
                     }
                 }
 
                 yyjson_doc_free(doc);
             } else {
-                for (size_t i = 0; i < bind_data.json_fields.size(); i++) {
-                    FlatVector::SetNull(output.data[5 + i], count, true);
+                for (auto &vec_data : json_data) {
+                    vec_data.SetInvalid(count);
                 }
             }
         }
@@ -750,7 +747,7 @@ static void NatsScanExecute(ClientContext &context, TableFunctionInput &data_p, 
                 for (size_t i = 0; i < bind_data.proto_fields.size(); i++) {
                     idx_t col_idx = 5 + i;
                     Value field_value = ExtractProtobufValue(proto_msg.get(), bind_data.proto_fields[i], bind_data.proto_descriptor);
-                    output.SetValue(col_idx, count, field_value);
+                    output.data[col_idx].SetValue(count, field_value);
                 }
             } else {
                 for (size_t i = 0; i < bind_data.proto_fields.size(); i++) {
@@ -769,23 +766,26 @@ static void NatsScanExecute(ClientContext &context, TableFunctionInput &data_p, 
         global_state.done = true;
     }
 
-    output.SetCardinality(count);
+    output.SetChildCardinality(count);
 }
 
 void NatsScanFunction::Register(ExtensionLoader &loader) {
-    TableFunction nats_scan("nats_scan", {LogicalType(LogicalTypeId::VARCHAR)}, NatsScanExecute, NatsScanBind,
-                            NatsScanInitGlobal, NatsScanInitLocal);
+    TableFunction nats_scan(Identifier("nats_scan"),
+                            FunctionSignature().AddPositionalOnly("stream", LogicalType(LogicalTypeId::VARCHAR)),
+                            NatsScanExecute, NatsScanBind, NatsScanInitGlobal, NatsScanInitLocal);
 
-    nats_scan.named_parameters["subject"] = LogicalType(LogicalTypeId::VARCHAR);
-    nats_scan.named_parameters["url"] = LogicalType(LogicalTypeId::VARCHAR);
-    nats_scan.named_parameters["start_seq"] = LogicalType(LogicalTypeId::UBIGINT);
-    nats_scan.named_parameters["end_seq"] = LogicalType(LogicalTypeId::UBIGINT);
-    nats_scan.named_parameters["start_time"] = LogicalType(LogicalTypeId::TIMESTAMP);
-    nats_scan.named_parameters["end_time"] = LogicalType(LogicalTypeId::TIMESTAMP);
-    nats_scan.named_parameters["json_extract"] = LogicalType::LIST(LogicalType(LogicalTypeId::VARCHAR));
-    nats_scan.named_parameters["proto_file"] = LogicalType(LogicalTypeId::VARCHAR);
-    nats_scan.named_parameters["proto_message"] = LogicalType(LogicalTypeId::VARCHAR);
-    nats_scan.named_parameters["proto_extract"] = LogicalType::LIST(LogicalType(LogicalTypeId::VARCHAR));
+    nats_scan.GetSignature().WithTypedKwargs("options", [](TypedKwargs &options) {
+        options.Add("subject", LogicalType(LogicalTypeId::VARCHAR));
+        options.Add("url", LogicalType(LogicalTypeId::VARCHAR));
+        options.Add("start_seq", LogicalType(LogicalTypeId::UBIGINT));
+        options.Add("end_seq", LogicalType(LogicalTypeId::UBIGINT));
+        options.Add("start_time", LogicalType(LogicalTypeId::TIMESTAMP));
+        options.Add("end_time", LogicalType(LogicalTypeId::TIMESTAMP));
+        options.Add("json_extract", LogicalType::LIST(LogicalType(LogicalTypeId::VARCHAR)));
+        options.Add("proto_file", LogicalType(LogicalTypeId::VARCHAR));
+        options.Add("proto_message", LogicalType(LogicalTypeId::VARCHAR));
+        options.Add("proto_extract", LogicalType::LIST(LogicalType(LogicalTypeId::VARCHAR)));
+    });
 
     loader.RegisterFunction(nats_scan);
 }
