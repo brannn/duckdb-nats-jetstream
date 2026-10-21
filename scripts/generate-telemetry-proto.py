@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Generate protobuf telemetry messages and publish to NATS JetStream.
-This creates test data for the protobuf extension functionality.
+Generate protobuf telemetry messages and publish them to the telemetry_proto stream (demo data).
+Run from the repository root after `protoc --python_out=test/proto -I test/proto test/proto/telemetry.proto`,
+which `make generate-data` does.
 """
 
 import sys
@@ -9,7 +10,7 @@ import time
 import random
 from datetime import datetime, timedelta
 
-# Add test/proto to path for imports
+# telemetry_pb2 is generated into test/proto
 sys.path.insert(0, 'test/proto')
 
 import telemetry_pb2

@@ -4,6 +4,42 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [0.3.0] - 2026-10-21
+
+### Upgrading from 0.2
+- `subject` is a NATS subject filter, no longer a substring match: `'telemetry.dc1.power'` matches only that subject. Use wildcards, as in `'telemetry.dc1.power.>'`, or `WHERE subject LIKE ...`.
+- `json_extract` dot paths read nested objects, and their columns use underscores (`location.zone` becomes `location_zone`), as protobuf columns do.
+- JSON numbers come back as written in the message (`42`, not `42.000000`).
+- Protobuf fields that track presence (messages, proto3 `optional`, `oneof` members) are NULL when unset. A message field returns a JSON object.
+- A field column named like another column gets a numeric suffix (`subject_1`).
+- Errors are DuckDB's IO, Binder and Permission errors.
+
+### Changed
+- Built for DuckDB v2.0.0, with cnats 3.13 and protobuf 6.33
+- The server applies subject filters, so messages on other subjects are not read; `*` and `>` wildcards work
+- Message reads ask for the next stored message, so deleted sequences cost nothing
+
+### Added
+- Streams without `allow_direct` are read through the JetStream API
+- Array indexes in `json_extract` paths (`'phases.0.amps'`)
+- Map fields as JSON objects; repeated bytes, enums and messages in JSON arrays
+- `.proto` files can import protobuf's well-known types, such as `google/protobuf/timestamp.proto`
+- `nats_scan` refuses to run when `enable_external_access` is false
+- Tests against a real nats-server, `make test_integration`, from a committed JetStream store
+
+### Fixed
+- Time ranges returned the wrong messages on streams with deleted messages
+- `end_time` included the first message after it
+- Nested `json_extract` paths always returned NULL
+- JSON numbers were rounded to six decimals and lost precision above 2^53
+- Repeated string fields produced invalid JSON, and repeated floats were rounded to six decimals
+- A `proto_extract` path through a repeated message field crashed the process
+- A NULL option or list element raised an internal error
+- A JSON field named like a base column failed with a duplicate column error
+
+### Removed
+- The Docker-based SQL test scripts, replaced by the sqllogictest suites under `test/sql`
+
 ## [0.2.1] - 2026-03-30
 
 ### Added
