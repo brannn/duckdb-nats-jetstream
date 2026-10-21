@@ -1,11 +1,121 @@
 # name: test/sql/nats_scan.test
-# description: Test nats_scan table function
+# description: nats_scan checks that need no NATS server (the schema is resolved before connecting)
 # group: [nats_js]
 
-# Require the extension to be loaded
 require nats_js
 
-# Test that the extension loads
-statement ok
-SELECT 1;
+# base columns: the payload is a BLOB unless json_extract is used
+query II
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM nats_scan('s'));
+----
+stream	VARCHAR
+subject	VARCHAR
+seq	UBIGINT
+ts_nats	TIMESTAMP
+payload	BLOB
 
+query II
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM nats_scan('s', json_extract := ['device_id', 'kw']));
+----
+stream	VARCHAR
+subject	VARCHAR
+seq	UBIGINT
+ts_nats	TIMESTAMP
+payload	VARCHAR
+device_id	VARCHAR
+kw	VARCHAR
+
+# protobuf columns take their types from the schema
+query II
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM nats_scan('s',
+    proto_file := 'test/proto/types_test.proto',
+    proto_message := 'TypesTest',
+    proto_extract := ['str_field', 'bytes_field', 'int32_field', 'int64_field', 'uint32_field', 'uint64_field',
+                      'sint32_field', 'sint64_field', 'fixed32_field', 'fixed64_field', 'sfixed32_field',
+                      'sfixed64_field', 'float_field', 'double_field', 'bool_field', 'status_field']))
+WHERE column_name NOT IN ('stream', 'subject', 'seq', 'ts_nats');
+----
+payload	BLOB
+str_field	VARCHAR
+bytes_field	BLOB
+int32_field	INTEGER
+int64_field	BIGINT
+uint32_field	UINTEGER
+uint64_field	UBIGINT
+sint32_field	INTEGER
+sint64_field	BIGINT
+fixed32_field	UINTEGER
+fixed64_field	UBIGINT
+sfixed32_field	INTEGER
+sfixed64_field	BIGINT
+float_field	FLOAT
+double_field	DOUBLE
+bool_field	BOOLEAN
+status_field	VARCHAR
+
+# nested fields use dot paths and become underscored columns; repeated fields are JSON arrays
+query II
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM nats_scan('s',
+    proto_file := 'test/proto/telemetry.proto',
+    proto_message := 'Telemetry',
+    proto_extract := ['device_id', 'location.zone', 'metrics.kw', 'tags']))
+WHERE column_name NOT IN ('stream', 'subject', 'seq', 'ts_nats', 'payload');
+----
+device_id	VARCHAR
+location_zone	VARCHAR
+metrics_kw	DOUBLE
+tags	VARCHAR
+
+statement error
+SELECT * FROM nats_scan('s', proto_file := 'test/proto/telemetry.proto', proto_message := 'Telemetry',
+    proto_extract := ['location.floor']);
+----
+Field 'floor' not found in message type 'Location'
+
+statement error
+SELECT * FROM nats_scan('s', proto_file := 'test/proto/telemetry.proto', proto_message := 'Telemetry',
+    proto_extract := ['device_id.zone']);
+----
+Field 'device_id' is not a message type
+
+statement error
+SELECT * FROM nats_scan('s', proto_file := 'test/proto/telemetry.proto', proto_message := 'Nope',
+    proto_extract := ['device_id']);
+----
+Message type 'Nope' not found
+
+statement error
+SELECT * FROM nats_scan('s', proto_file := 'test/proto/missing.proto', proto_message := 'M', proto_extract := ['a']);
+----
+Failed to import protobuf schema file
+
+statement error
+SELECT * FROM nats_scan('s', proto_extract := ['a']);
+----
+proto_file parameter is required when using proto_extract
+
+statement error
+SELECT * FROM nats_scan('s', proto_file := 'test/proto/telemetry.proto', proto_extract := ['a']);
+----
+proto_message parameter is required when using proto_extract
+
+statement error
+SELECT * FROM nats_scan('s', json_extract := ['a'], proto_extract := ['b']);
+----
+Cannot use both json_extract and proto_extract parameters
+
+statement error
+SELECT * FROM nats_scan('s', start_seq := 1, start_time := TIMESTAMP '2026-01-01 00:00:00');
+----
+Cannot mix sequence-based (start_seq/end_seq) and time-based (start_time/end_time) parameters
+
+statement error
+SELECT * FROM nats_scan('s', unknown_option := 1);
+----
+unknown_option
+
+# nothing listens on port 1
+statement error
+SELECT * FROM nats_scan('s', url := 'nats://127.0.0.1:1');
+----
+Failed to connect to NATS

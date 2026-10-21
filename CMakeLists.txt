@@ -23,13 +23,17 @@ build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
 
 # Find dependencies via vcpkg
+# cnats links OpenSSL and Threads but its CMake package does not find them
+find_package(OpenSSL REQUIRED)
+find_package(Threads REQUIRED)
 find_package(cnats CONFIG REQUIRED)
 find_package(Protobuf CONFIG REQUIRED)
 
 # Link dependencies - use plain signature to match DuckDB's build functions
 # cnats exports 'cnats::nats_static' target for static library
-target_link_libraries(${EXTENSION_NAME} cnats::nats_static protobuf::libprotobuf protobuf::libprotoc)
-target_link_libraries(${LOADABLE_EXTENSION_NAME} cnats::nats_static protobuf::libprotobuf protobuf::libprotoc)
+# The .proto parser (compiler/importer.h) is part of libprotobuf; libprotoc holds only the code generators
+target_link_libraries(${EXTENSION_NAME} cnats::nats_static protobuf::libprotobuf)
+target_link_libraries(${LOADABLE_EXTENSION_NAME} cnats::nats_static protobuf::libprotobuf)
 
 # Install static library
 install(
