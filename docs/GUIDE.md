@@ -1,290 +1,169 @@
-# DuckDB NATS JetStream Extension - Full Guide
+# DuckDB NATS JetStream Extension: Guide
 
-A DuckDB extension that enables SQL queries over NATS JetStream message streams. This extension allows DuckDB to read messages directly from JetStream streams as table data, supporting sequence and timestamp-based range queries with JSON and Protocol Buffers payload extraction.
+The extension adds one table function, `nats_scan`, which reads the messages stored in a JetStream stream and returns one row per message. It reads a bounded range: the scan ends at the stream's last message as of the start of the query.
 
 ## Installation
-
-### From DuckDB Community Extensions (Recommended)
-
-Once published to the DuckDB Community Extensions repository, installation is simple:
 
 ```sql
 INSTALL nats_js FROM community;
 LOAD nats_js;
 ```
 
-This method automatically downloads the pre-built extension binary for your platform. No compilation required.
+The NATS client (cnats) and Protocol Buffers are linked into the extension, so nothing else needs installing.
 
-**Note**: This extension requires the NATS C client library and Protocol Buffers library to be installed on your system:
+`nats_scan` needs a NATS server with JetStream enabled. It connects to `nats://localhost:4222` unless a query sets `url`. Development and tests use nats-server 2.15; reading by subject relies on `next_by_subj`, which needs nats-server 2.9 or later.
 
-```bash
-# macOS
-brew install cnats protobuf
-
-# Ubuntu/Debian
-sudo apt-get install libnats-dev libprotobuf-dev
-
-# Fedora/RHEL
-sudo dnf install cnats-devel protobuf-devel
-```
-
-### Building from Source
-
-For development or if you need to build from source:
-
-**Prerequisites:**
-- DuckDB v1.4.1
-- NATS C client library (v3.11.0 or later)
-- Protocol Buffers library (v3.0 or later)
-- CMake 3.15 or later
-- C++17 compatible compiler
-
-**Build steps:**
-
-Clone the repository and initialize submodules:
-
-```bash
-git clone https://github.com/brannn/duckdb-nats-jetstream
-cd duckdb-nats-jetstream
-git submodule update --init --recursive
-```
-
-Install the required libraries. On macOS with Homebrew:
-
-```bash
-brew install cnats protobuf
-```
-
-On Ubuntu/Debian:
-
-```bash
-sudo apt-get install libnats-dev libprotobuf-dev protobuf-compiler
-```
-
-Build the extension:
-
-```bash
-make build
-```
-
-The compiled extension will be located at `build/release/extension/nats_js/nats_js.duckdb_extension`.
-
-**Loading the extension:**
+## Reading a Stream
 
 ```sql
-LOAD 'build/release/extension/nats_js/nats_js.duckdb_extension';
-```
-
-Note: When loading unsigned extensions, you may need to start DuckDB with the `-unsigned` flag:
-
-```bash
-duckdb -unsigned
-```
-
-### Runtime Requirements
-
-A running NATS server with JetStream enabled is required for operation. The extension connects to `nats://localhost:4222` by default, which can be overridden using the `url` parameter.
-
-## Query Capabilities
-
-The extension provides the `nats_scan` table function, which returns messages from a JetStream stream. Each row represents a single message with columns for stream name, subject, sequence number, timestamp, and payload.
-
-### Basic Message Retrieval
-
-Query all messages from a stream:
-
-```sql
-SELECT stream, subject, seq, ts_nats, payload
-FROM nats_scan('telemetry');
+SELECT stream, subject, seq, ts_nats, octet_length(payload) AS bytes
+FROM nats_scan('telemetry', end_seq := 3);
 ```
 
 ```
-┌───────────┬──────────────────────────────────┬────────┬─────────────────────────┬──────────────────────────────────────┐
-│  stream   │             subject              │  seq   │        ts_nats          │               payload                │
-│  varchar  │             varchar              │ uint64 │       timestamp         │                blob                  │
-├───────────┼──────────────────────────────────┼────────┼─────────────────────────┼──────────────────────────────────────┤
-│ telemetry │ telemetry.dc1.power.pm5560-001   │      1 │ 2025-11-01 09:00:00     │ \x7B\x22\x64\x65\x76\x69\x63\x65...  │
-│ telemetry │ telemetry.dc1.power.pm5560-002   │      2 │ 2025-11-01 09:00:01     │ \x7B\x22\x64\x65\x76\x69\x63\x65...  │
-│ telemetry │ telemetry.dc1.power.pm5560-003   │      3 │ 2025-11-01 09:00:02     │ \x7B\x22\x64\x65\x76\x69\x63\x65...  │
-└───────────┴──────────────────────────────────┴────────┴─────────────────────────┴──────────────────────────────────────┘
+┌───────────┬───────────────────────────────────────┬────────┬────────────────────────────┬───────┐
+│  stream   │                subject                │  seq   │          ts_nats           │ bytes │
+│  varchar  │                varchar                │ uint64 │         timestamp          │ int64 │
+├───────────┼───────────────────────────────────────┼────────┼────────────────────────────┼───────┤
+│ telemetry │ telemetry.dc1.power.pm5560.pm5560-001 │      1 │ 2026-10-21 23:10:23.776818 │   183 │
+│ telemetry │ telemetry.dc1.power.pm5560.pm5560-002 │      2 │ 2026-10-21 23:10:23.777079 │   183 │
+│ telemetry │ telemetry.dc1.power.pm5560.pm5560-003 │      3 │ 2026-10-21 23:10:23.777243 │   183 │
+└───────────┴───────────────────────────────────────┴────────┴────────────────────────────┴───────┘
 ```
 
-The function returns five base columns: `stream` (VARCHAR), `subject` (VARCHAR), `seq` (UBIGINT), `ts_nats` (TIMESTAMP), and `payload` (BLOB by default, VARCHAR when using `json_extract`).
+The five base columns are:
 
-### Sequence Range Queries
+| Column | Type | Contents |
+|--------|------|----------|
+| `stream` | VARCHAR | Stream name |
+| `subject` | VARCHAR | Message subject |
+| `seq` | UBIGINT | Stream sequence number |
+| `ts_nats` | TIMESTAMP | Time the server stored the message, in UTC |
+| `payload` | BLOB, or VARCHAR with `json_extract` | Message data |
 
-Retrieve messages within a specific sequence number range:
+Extracted fields follow as extra columns. Message headers are not returned yet.
+
+### Sequence Ranges
 
 ```sql
 SELECT seq, ts_nats, payload
 FROM nats_scan('telemetry', start_seq := 1000, end_seq := 2000);
 ```
 
-Sequence numbers are inclusive on both ends. The `start_seq` parameter defaults to 1, and `end_seq` defaults to the last message in the stream.
+Both ends are inclusive. `start_seq` defaults to the stream's first message and `end_seq` to its last. Deleted sequences are skipped.
 
-### Timestamp Range Queries
-
-Query messages within a time range:
+### Time Ranges
 
 ```sql
-SELECT seq, ts_nats, subject, payload
+SELECT seq, ts_nats, subject
 FROM nats_scan('telemetry',
-    start_time := '2025-11-01 09:00:00'::TIMESTAMP,
-    end_time := '2025-11-01 17:00:00'::TIMESTAMP
+    start_time := TIMESTAMP '2026-10-21 09:00:00',
+    end_time := TIMESTAMP '2026-10-21 17:00:00'
 );
 ```
 
-The extension uses binary search to resolve timestamps to sequence numbers, providing O(log n) lookup performance. Timestamp parameters cannot be mixed with sequence parameters in the same query.
+Both ends are inclusive and compared with `ts_nats` at microsecond precision, in UTC. The start is found by binary search, which takes about 20 requests on a stream of a million messages; the scan stops at the first message after `end_time`. A time range cannot be combined with `start_seq` or `end_seq`.
 
-### Subject Filtering
+To compare with the current time, convert it to UTC: `start_time := now() AT TIME ZONE 'UTC' - INTERVAL 1 HOUR`.
 
-Filter messages by subject pattern:
-
-```sql
-SELECT seq, subject, payload
-FROM nats_scan('telemetry', subject := 'telemetry.dc1.power.pm5560-001');
-```
-
-The subject filter performs substring matching on message subjects. This filtering occurs after message retrieval, so it works efficiently when combined with sequence or timestamp ranges.
-
-### Combined Queries
-
-Combine multiple query parameters:
+### Subject Filters
 
 ```sql
-SELECT seq, ts_nats, subject, payload
-FROM nats_scan('telemetry',
-    subject := 'pm5560',
-    start_time := '2025-11-01 09:00:00'::TIMESTAMP,
-    end_time := '2025-11-01 17:00:00'::TIMESTAMP
-);
+SELECT seq, subject
+FROM nats_scan('telemetry', subject := 'telemetry.dc1.power.>');
 ```
 
-## JSON Processing
+`subject` is a NATS subject filter: `*` matches one token and `>` matches the remaining tokens. The server applies it, so messages on other subjects are never read. A filter without wildcards matches one subject exactly. For substring matches, filter in SQL with `WHERE subject LIKE ...`, which reads the whole range.
 
-The extension can extract fields from JSON payloads and expose them as additional columns. This feature is useful for IoT telemetry, application logs, and other structured message data.
+## JSON Payloads
 
-### Extracting JSON Fields
-
-Use the `json_extract` parameter to specify fields to extract:
+`json_extract` lists fields to extract. Each becomes a VARCHAR column, and `payload` becomes VARCHAR too:
 
 ```sql
-SELECT device_id, kw, voltage, pf
-FROM nats_scan('telemetry',
-    start_seq := 1,
-    end_seq := 100,
-    json_extract := ['device_id', 'kw', 'voltage', 'pf']
-);
+SELECT seq, device_id, kw, voltage, pf
+FROM nats_scan('telemetry', start_seq := 1, end_seq := 4,
+    json_extract := ['device_id', 'kw', 'voltage', 'pf']);
 ```
 
 ```
-┌──────────────┬─────────┬─────────┬─────────┐
-│  device_id   │   kw    │ voltage │   pf    │
-│   varchar    │ varchar │ varchar │ varchar │
-├──────────────┼─────────┼─────────┼─────────┤
-│ pm5560-001   │ 42.5    │ 480.2   │ 0.95    │
-│ pm5560-002   │ 38.2    │ 479.8   │ 0.92    │
-│ pm5560-003   │ 51.7    │ 481.1   │ 0.97    │
-│ pm5560-004   │ 45.3    │ 480.5   │ 0.94    │
-└──────────────┴─────────┴─────────┴─────────┘
+┌────────┬────────────┬─────────┬─────────┬─────────┐
+│  seq   │ device_id  │   kw    │ voltage │   pf    │
+│ uint64 │  varchar   │ varchar │ varchar │ varchar │
+├────────┼────────────┼─────────┼─────────┼─────────┤
+│      1 │ pm5560-001 │ 49.64   │ 480.3   │ 0.926   │
+│      2 │ pm5560-002 │ 56.51   │ 482.4   │ 0.896   │
+│      3 │ pm5560-003 │ 62.06   │ 484.4   │ 0.872   │
+│      4 │ pm5560-004 │ 81.1    │ 479.5   │ 0.892   │
+└────────┴────────────┴─────────┴─────────┴─────────┘
 ```
 
-This example extracts power monitoring data from a hypothetical IoT sensor stream. Each extracted field becomes a VARCHAR column in the result set.
+| JSON value | Column value |
+|------------|--------------|
+| string | the string, unescaped |
+| number | the number as written in the message, e.g. `42`, `1e-7`, `9007199254740993` |
+| `true`, `false` | `'true'`, `'false'` |
+| `null`, missing field | NULL |
+| object, array | JSON text |
 
-### Type Handling
+A message that is not valid JSON gives NULL fields. A payload that is not valid UTF-8 reads as a NULL `payload`, since the column is VARCHAR.
 
-The JSON extraction handles multiple data types. String values are returned directly, numeric values are converted to strings, boolean values become "true" or "false", and null values produce SQL NULL. Complex types like objects and arrays are serialized as JSON strings.
+Field names are dot paths: `'location.zone'` reads `{"location": {"zone": ...}}`, and numeric parts index arrays (`'phases.0.amps'`). A key that contains dots is matched literally first. Column names replace dots with underscores (`location_zone`). A field named like another column gets a numeric suffix: extracting `'subject'` gives a `subject_1` column.
 
-### Analytics with Extracted Fields
-
-Combine JSON extraction with DuckDB's analytical capabilities:
+Cast the text for arithmetic:
 
 ```sql
-SELECT
-    device_id,
-    AVG(CAST(kw AS DOUBLE)) as avg_power,
-    MAX(CAST(kw AS DOUBLE)) as peak_power,
-    COUNT(*) as reading_count
-FROM nats_scan('telemetry',
-    start_time := '2025-11-01 00:00:00'::TIMESTAMP,
-    end_time := '2025-11-01 23:59:59'::TIMESTAMP,
-    json_extract := ['device_id', 'kw']
-)
+SELECT device_id, round(avg(kw::DOUBLE), 2) AS avg_kw, max(kw::DOUBLE) AS peak_kw, count(*) AS readings
+FROM nats_scan('telemetry', subject := 'telemetry.*.power.>', json_extract := ['device_id', 'kw'])
 GROUP BY device_id
-ORDER BY avg_power DESC;
+ORDER BY avg_kw DESC;
 ```
 
 ```
-┌──────────────┬───────────┬────────────┬───────────────┐
-│  device_id   │ avg_power │ peak_power │ reading_count │
-│   varchar    │  double   │   double   │     int64     │
-├──────────────┼───────────┼────────────┼───────────────┤
-│ pm5560-003   │     51.24 │      58.90 │          1440 │
-│ pm5560-004   │     45.67 │      52.30 │          1440 │
-│ pm5560-001   │     42.18 │      49.10 │          1440 │
-│ pm5560-002   │     38.92 │      44.50 │          1440 │
-└──────────────┴───────────┴────────────┴───────────────┘
+┌────────────┬────────┬─────────┬──────────┐
+│ device_id  │ avg_kw │ peak_kw │ readings │
+│  varchar   │ double │ double  │  int64   │
+├────────────┼────────┼─────────┼──────────┤
+│ pm5560-005 │  90.38 │  119.69 │       61 │
+│ pm5560-004 │  69.11 │   89.27 │       61 │
+│ pm5560-003 │  67.73 │   86.58 │       61 │
+│ pm5560-001 │  45.82 │   59.97 │       61 │
+│ pm5560-002 │  45.61 │    59.6 │       61 │
+└────────────┴────────┴─────────┴──────────┘
 ```
 
-This query analyzes power consumption across multiple devices, demonstrating how the extension integrates with DuckDB's aggregation and sorting functions.
+DuckDB's own JSON functions work on the payload too, for example `decode(payload)->>'$.zone'`.
 
-## Protocol Buffers Processing
+## Protocol Buffers Payloads
 
-The extension supports extracting fields from Protocol Buffers (protobuf) encoded messages. This feature is essential for systems using protobuf for efficient binary serialization, common in IoT telemetry, microservices, and high-throughput data pipelines.
-
-### Extracting Protobuf Fields
-
-Use the `proto_extract` parameter along with `proto_file` and `proto_message` to specify fields to extract:
+`proto_file` is the path to a `.proto` file, `proto_message` a message type defined in it, and `proto_extract` the fields to read. The schema is parsed when the query is bound, so a missing file or field fails before any message is read.
 
 ```sql
-SELECT device_id, timestamp, location_zone, metrics_kw, online
-FROM nats_scan('telemetry',
-    proto_file := 'schemas/telemetry.proto',
+SELECT device_id, timestamp, location_zone, metrics_kw, online, tags
+FROM nats_scan('telemetry_proto', end_seq := 4,
+    proto_file := 'test/proto/telemetry.proto',
     proto_message := 'Telemetry',
-    proto_extract := ['device_id', 'timestamp', 'location.zone', 'metrics.kw', 'online']
-);
+    proto_extract := ['device_id', 'timestamp', 'location.zone', 'metrics.kw', 'online', 'tags']);
 ```
 
 ```
-┌──────────────┬─────────────────────┬───────────────┬────────────┬─────────┐
-│  device_id   │      timestamp      │ location_zone │ metrics_kw │ online  │
-│   varchar    │       int64         │    varchar    │   double   │ boolean │
-├──────────────┼─────────────────────┼───────────────┼────────────┼─────────┤
-│ pm5560-001   │ 1730455200000000000 │ zone-a        │      42.50 │ true    │
-│ pm5560-002   │ 1730455201000000000 │ zone-a        │      38.20 │ true    │
-│ pm5560-003   │ 1730455202000000000 │ zone-b        │      51.70 │ true    │
-│ pm5560-004   │ 1730455203000000000 │ zone-b        │      45.30 │ false   │
-└──────────────┴─────────────────────┴───────────────┴────────────┴─────────┘
+┌────────────┬───────────────┬───────────────┬────────────┬─────────┬──────────────────────────┐
+│ device_id  │   timestamp   │ location_zone │ metrics_kw │ online  │           tags           │
+│  varchar   │     int64     │    varchar    │   double   │ boolean │         varchar          │
+├────────────┼───────────────┼───────────────┼────────────┼─────────┼──────────────────────────┤
+│ pm5560-001 │ 1792620624069 │ dc1           │      5.462 │ true    │ ["power","dc1","active"] │
+│ pm5560-002 │ 1792620624069 │ dc1           │      4.658 │ true    │ ["power","dc1","active"] │
+│ pm5560-003 │ 1792620624069 │ dc2           │      4.552 │ true    │ ["power","dc2","active"] │
+│ pm5560-004 │ 1792620624069 │ dc2           │      4.638 │ true    │ ["power","dc2","active"] │
+└────────────┴───────────────┴───────────────┴────────────┴─────────┴──────────────────────────┘
 ```
 
-This example extracts fields from a protobuf-encoded telemetry stream. The `proto_file` parameter specifies the path to the .proto schema file, `proto_message` specifies the message type name, and `proto_extract` lists the fields to extract.
+Dot paths go through nested messages, and column names replace dots with underscores. A path cannot continue past a repeated field; extract the whole field instead.
 
-### Nested Message Fields
-
-Protobuf nested messages are accessed using dot notation in field paths. The extension automatically navigates through nested message structures:
-
-```sql
-SELECT device_id, location_zone, location_rack, metrics_kw, metrics_voltage
-FROM nats_scan('telemetry',
-    proto_file := 'schemas/telemetry.proto',
-    proto_message := 'Telemetry',
-    proto_extract := [
-        'device_id',
-        'location.zone',
-        'location.rack',
-        'metrics.kw',
-        'metrics.voltage'
-    ]
-);
-```
-
-For a schema with nested Location and Metrics messages, the extension extracts `location.zone` from the Location message and `metrics.kw` from the Metrics message. Column names use underscores instead of dots (`location_zone`, `metrics_kw`) for natural SQL syntax.
+Imports resolve against the `.proto` file's directory and protobuf's well-known types, such as `google/protobuf/timestamp.proto`. A well-known type reads as its JSON form (a `Timestamp` is an RFC 3339 string); its fields can be extracted too, as in `'created_at.seconds'`.
 
 ### Type Mapping
 
-The extension maps protobuf types to appropriate DuckDB types:
-
-| Protobuf Type | DuckDB Type |
+| Protobuf type | DuckDB type |
 |---------------|-------------|
 | `string` | VARCHAR |
 | `bytes` | BLOB |
@@ -295,234 +174,109 @@ The extension maps protobuf types to appropriate DuckDB types:
 | `float` | FLOAT |
 | `double` | DOUBLE |
 | `bool` | BOOLEAN |
-| `enum` | VARCHAR (enum name) |
+| `enum` | VARCHAR, the value's name |
+| message | VARCHAR, a JSON object |
+| `repeated` field | VARCHAR, a JSON array |
+| `map` field | VARCHAR, a JSON object |
 
-This type mapping enables direct use of numeric fields in calculations without type casting:
+In the JSON of repeated and map fields, numbers are JSON numbers, bytes are base64 and enums are names. Messages, whether a field or an array element, follow protobuf's JSON mapping with the field names from the `.proto` file; it writes an int64 that a double cannot hold exactly as a string. Cast an array to a list with `tags::JSON::VARCHAR[]`.
 
-```sql
-SELECT
-    device_id,
-    AVG(metrics_kw) as avg_power,
-    MAX(metrics_voltage) as peak_voltage,
-    COUNT(*) as reading_count
-FROM nats_scan('telemetry',
-    proto_file := 'schemas/telemetry.proto',
-    proto_message := 'Telemetry',
-    proto_extract := ['device_id', 'metrics.kw', 'metrics.voltage']
-)
-GROUP BY device_id;
-```
+Fields with presence (messages, proto3 `optional` fields and `oneof` members) are NULL when unset. Other proto3 fields read as their default value: `0`, `''` or `false`. A path through an unset message is NULL. A payload that does not parse gives NULL fields.
 
-```
-┌──────────────┬───────────┬──────────────┬───────────────┐
-│  device_id   │ avg_power │ peak_voltage │ reading_count │
-│   varchar    │  double   │    double    │     int64     │
-├──────────────┼───────────┼──────────────┼───────────────┤
-│ pm5560-003   │     51.24 │       482.30 │          1440 │
-│ pm5560-004   │     45.67 │       481.80 │          1440 │
-│ pm5560-001   │     42.18 │       480.90 │          1440 │
-│ pm5560-002   │     38.92 │       479.50 │          1440 │
-└──────────────┴───────────┴──────────────┴───────────────┘
-```
+## How Reads Work
 
-### Analytics with Protobuf Data
+`nats_scan` creates no consumers. It connects when the query starts, reads the stream info, and then requests one message at a time: the first message at or after a sequence whose subject matches the filter (`>` without one). Deleted sequences are skipped on the server, and the next request starts after the returned message.
 
-Combine protobuf extraction with DuckDB's analytical capabilities for complex queries:
+Streams with `allow_direct` are read with direct gets, which any replica can answer. Other streams are read through the JetStream API (`$JS.API.STREAM.MSG.GET`), which the stream leader answers.
 
-```sql
-SELECT
-    location_zone,
-    COUNT(*) as message_count,
-    ROUND(AVG(metrics_kw), 2) as avg_kw,
-    ROUND(MIN(metrics_kw), 2) as min_kw,
-    ROUND(MAX(metrics_kw), 2) as max_kw
-FROM nats_scan('telemetry',
-    proto_file := 'schemas/telemetry.proto',
-    proto_message := 'Telemetry',
-    proto_extract := ['location.zone', 'metrics.kw'],
-    start_time := '2025-11-01 00:00:00'::TIMESTAMP,
-    end_time := '2025-11-01 23:59:59'::TIMESTAMP
-)
-GROUP BY location_zone
-ORDER BY avg_kw DESC;
-```
+The scan stops at the stream's last sequence as recorded at the start, so it finishes on a stream that is still receiving messages. Each request waits up to 5 seconds. The scan runs on one thread and returns rows in chunks of 2,048, and a query can be cancelled between messages.
 
-This query analyzes power consumption by data center zone, demonstrating how protobuf extraction integrates with time-based queries and aggregations.
+Reading one message per request makes the server's round trip the main cost: roughly 30,000 messages a second on loopback, and about 1,000 a second over a 1 ms network round trip. Narrow scans with `subject`, sequence or time options rather than `WHERE`, which filters after reading.
 
-### Filtering on Protobuf Fields
+## Security
 
-Filter results using extracted protobuf fields:
-
-```sql
-SELECT device_id, location_zone, metrics_kw, metrics_voltage, online
-FROM nats_scan('telemetry',
-    proto_file := 'schemas/telemetry.proto',
-    proto_message := 'Telemetry',
-    proto_extract := ['device_id', 'location.zone', 'metrics.kw', 'metrics.voltage', 'online']
-)
-WHERE location_zone = 'dc1'
-  AND metrics_kw > 5.0
-  AND online = true;
-```
-
-The extension extracts and decodes protobuf fields, then DuckDB applies the WHERE clause filters efficiently.
-
-### Payload Column Behavior
-
-The `payload` column type depends on the extraction parameters used:
-- **BLOB** (default): When no extraction parameters are specified, or when using `proto_extract`
-- **VARCHAR**: When using `json_extract` for JSON messages
-
-This prevents UTF-8 validation errors on binary data while keeping JSON messages readable:
-
-```sql
-SELECT seq, typeof(payload) as payload_type, octet_length(payload) as payload_size
-FROM nats_scan('telemetry',
-    proto_file := 'schemas/telemetry.proto',
-    proto_message := 'Telemetry',
-    proto_extract := ['device_id']
-)
-LIMIT 5;
-```
-
-## Implementation Details
-
-Understanding the extension's implementation approach helps explain its performance characteristics and operational behavior.
-
-### Direct Get API
-
-The extension uses NATS JetStream's Direct Get API for message retrieval. This API allows fetching individual messages by sequence number without establishing a consumer. Direct Get provides low-latency access to historical messages and avoids the overhead of consumer management for ad-hoc queries.
-
-The extension does not create durable or ephemeral consumers for typical query operations. Each message fetch is an independent operation that retrieves a single message by sequence number. This approach is optimal for bounded historical queries where the query range is known in advance.
-
-### Binary Search for Timestamp Resolution
-
-When queries specify timestamp ranges using `start_time` or `end_time` parameters, the extension must resolve these timestamps to sequence numbers. The implementation uses binary search over the stream's sequence range to find the first message at or after the target timestamp.
-
-The binary search algorithm uses Direct Get to fetch messages at the midpoint of the current search range, compares their timestamps to the target, and narrows the range accordingly. This provides O(log n) performance for timestamp resolution, where n is the number of messages in the stream. For a stream with one million messages, timestamp resolution requires approximately 20 message fetches.
-
-After resolving timestamps to sequences, the extension uses the same Direct Get approach to retrieve messages in the resolved sequence range. Subject filtering, when specified, is applied during message iteration rather than during timestamp resolution.
-
-### Resource Management
-
-The extension manages NATS connections and JetStream contexts using RAII patterns. Connections are established during the table function's initialization phase and cleaned up automatically when the query completes. Connection timeouts are set to 5 seconds to prevent indefinite blocking on unreachable servers.
-
-The extension uses the NATS C client library (cnats) for all NATS protocol operations and yyjson for JSON parsing. Both libraries are production-tested and provide the necessary performance for analytical workloads.
-
-### Execution Model
-
-The extension executes in a single-threaded model. Each query establishes one connection to the NATS server and fetches messages sequentially. Messages are returned to DuckDB in batches of up to 2048 rows (STANDARD_VECTOR_SIZE), allowing DuckDB to process results incrementally.
+With `SET enable_external_access = false`, `nats_scan` refuses to run, since it opens network connections and reads `.proto` files.
 
 ## API Reference
 
-The `nats_scan` table function accepts the following parameters:
+```
+nats_scan(stream, [subject, url, start_seq, end_seq, start_time, end_time,
+                   json_extract, proto_file, proto_message, proto_extract])
+```
 
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `stream_name` | VARCHAR | Yes | - | Name of the JetStream stream to query |
-| `url` | VARCHAR | No | `nats://localhost:4222` | NATS server URL |
-| `subject` | VARCHAR | No | - | Subject filter (substring match) |
-| `start_seq` | UBIGINT | No | 1 | Starting sequence number (inclusive) |
-| `end_seq` | UBIGINT | No | Last message | Ending sequence number (inclusive) |
-| `start_time` | TIMESTAMP | No | - | Starting timestamp (inclusive) |
-| `end_time` | TIMESTAMP | No | - | Ending timestamp (inclusive) |
-| `json_extract` | LIST(VARCHAR) | No | - | List of JSON field names to extract |
-| `proto_file` | VARCHAR | No | - | Path to .proto schema file |
-| `proto_message` | VARCHAR | No | - | Protobuf message type name |
-| `proto_extract` | LIST(VARCHAR) | No | - | List of protobuf field paths to extract (supports dot notation for nested fields) |
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `stream` | VARCHAR | required | Stream name (positional) |
+| `url` | VARCHAR | `nats://localhost:4222` | NATS server URL |
+| `subject` | VARCHAR | all subjects | NATS subject filter, with `*` and `>` wildcards |
+| `start_seq` | UBIGINT | first message | First sequence, inclusive |
+| `end_seq` | UBIGINT | last message | Last sequence, inclusive |
+| `start_time` | TIMESTAMP | - | Earliest message time in UTC, inclusive |
+| `end_time` | TIMESTAMP | - | Latest message time in UTC, inclusive |
+| `json_extract` | VARCHAR[] | - | JSON fields to extract, as dot paths |
+| `proto_file` | VARCHAR | - | Path to the `.proto` file |
+| `proto_message` | VARCHAR | - | Message type in `proto_file` |
+| `proto_extract` | VARCHAR[] | - | Protobuf fields to extract, as dot paths |
 
-### Parameter Constraints
+Rules:
 
-Sequence-based parameters (`start_seq`, `end_seq`) cannot be combined with timestamp-based parameters (`start_time`, `end_time`) in the same query. The extension will return an error if both parameter types are specified.
-
-The `json_extract` and `proto_extract` parameters are mutually exclusive. Use `json_extract` for JSON-encoded messages or `proto_extract` for protobuf-encoded messages, but not both in the same query.
-
-When using `proto_extract`, both `proto_file` and `proto_message` parameters are required. The `proto_file` parameter specifies the path to the .proto schema file, and `proto_message` specifies the message type name within that file.
-
-Extracted fields (JSON or protobuf) are appended as additional columns after the five base columns (`stream`, `subject`, `seq`, `ts_nats`, `payload`). Column names for nested protobuf fields use underscores instead of dots (e.g., `location.zone` becomes `location_zone`).
+- Sequence options (`start_seq`, `end_seq`) cannot be combined with time options (`start_time`, `end_time`).
+- `json_extract` and `proto_extract` cannot be combined.
+- `proto_extract` requires `proto_file` and `proto_message`.
+- Options cannot be NULL, and field lists cannot contain NULL or empty names.
 
 ## Roadmap
 
-### Current Capabilities (MVP)
+Planned for 0.4.0:
 
-- Bounded historical queries using Direct Get API
-- Sequence-based range queries (`start_seq`, `end_seq`)
-- Timestamp-based range queries with binary search (`start_time`, `end_time`)
-- Subject filtering (exact match)
-- JSON payload extraction with field mapping
-- Protocol Buffers support:
-  - Runtime .proto schema parsing
-  - All primitive types (string, bytes, integers, floats, bool, enum)
-  - Nested message navigation with dot notation
-  - Automatic type mapping to DuckDB types
+- Reads through an ephemeral ordered consumer, which streams messages in batches, with direct gets as the fallback
+- Filter pushdown, so `WHERE seq`, `WHERE ts_nats` and `WHERE subject = ...` narrow the read like the options do, and projection pushdown, which skips payload decoding when it is not needed
+- A headers column
+- Authentication and TLS through DuckDB secrets: credentials files, NKeys, tokens, user and password
+- Progress and row estimates from the stream's counters
+- Tests against a real server in CI
 
-### Planned Features
-
-#### Stateful Consumption
-- **Durable consumers** - Message acknowledgement for reliable ETL workflows
-- **Checkpoint management** - Resumable processing with state persistence
-- **Consumer groups** - Distributed processing across multiple workers
-
-#### Advanced Protocol Buffers
-- **Repeated fields** - Array support with proper DuckDB LIST type mapping
-- **Map fields** - Key-value map support with DuckDB MAP type
-- **Oneof fields** - Union type handling
-- **Any types** - Dynamic type resolution
-- **Import resolution** - Support for .proto files with imports
-- **Well-known types** - Native support for Timestamp, Duration, Struct, etc.
-
-#### Additional Data Formats
-- **Apache Avro** - Schema registry integration and binary encoding support
-- **MessagePack** - Compact binary JSON alternative
-- **CBOR** - Concise Binary Object Representation
-
-#### Live Streaming
-- **Tail function** - Unbounded reads for real-time data processing
-- **Backpressure management** - Flow control for high-throughput streams
-- **Push-based delivery** - Event-driven message consumption
-
-#### Performance Enhancements
-- **Parallel scanning** - Multi-threaded message retrieval for multi-subject streams
-- **Vectorized decoding** - SIMD optimizations for JSON/protobuf parsing
-- **Schema caching** - Reuse parsed schemas across queries
-- **Connection pooling** - Reduce connection overhead for repeated queries
-
-#### Configuration & Usability
-- **Connection profiles** - Named connection configurations
-- **Credential management** - Support for NATS authentication (tokens, JWT, NKeys)
-- **TLS support** - Encrypted connections to NATS servers
-- **Stream discovery** - Automatic stream and subject enumeration
-
-### Development Resources
-
-Detailed planning documentation is available in the `planning/` directory, including:
-- Complete development roadmap with milestones
-- Implementation specifications
-- Technical architecture decisions
-- Performance benchmarks and optimization strategies
+Later ideas: listing streams and their info, reading KV buckets, native LIST and STRUCT columns for protobuf, well-known types such as `Timestamp` as DuckDB types, imports from other directories, and loading schemas from S3 or HTTP.
 
 ## Development
 
-Build the extension:
+### Building
+
+The build follows DuckDB's extension template and gets cnats and protobuf from vcpkg:
 
 ```bash
-make build
+git clone --recurse-submodules https://github.com/brannn/duckdb-nats-jetstream
+cd duckdb-nats-jetstream
+git clone https://github.com/microsoft/vcpkg.git
+./vcpkg/bootstrap-vcpkg.sh
+export VCPKG_TOOLCHAIN_PATH=$PWD/vcpkg/scripts/buildsystems/vcpkg.cmake
+GEN=ninja make release
 ```
 
-Run tests:
+The extension is written to `build/release/extension/nats_js/nats_js.duckdb_extension`, next to a DuckDB shell built from the same source in `build/release/duckdb`. Start that shell, or any DuckDB 2.0 shell, with `-unsigned` and load the file:
+
+```sql
+LOAD 'build/release/extension/nats_js/nats_js.duckdb_extension';
+```
+
+### Tests
 
 ```bash
-make test
+make test               # tests that need no server
+make test_integration   # tests against a real nats-server
 ```
 
-Clean build artifacts:
+`make test_integration` copies the JetStream store in `test/fixtures/jetstream` to `build/`, serves it with `nats-server` on port 42222 and runs `test/sql/integration`. It needs `nats-server` on the `PATH`, or `NATS_SERVER=/path/to/nats-server`. The store holds synthetic messages with fixed sequences and timestamps; `test/fixtures/make-jetstream-store.sh` regenerates it, using nats-server, the nats CLI and protoc.
+
+### Demo Data
 
 ```bash
-make clean
+pip install -r requirements.txt
+make generate-data
 ```
 
-Additional documentation for contributors is available in the `planning/` directory, including implementation plans, technical architecture, and development roadmap.
+This starts nats-server with Docker Compose, creates the demo streams, and publishes an hour of synthetic JSON readings to `telemetry` and `environmental` and 500 protobuf readings to `telemetry_proto`. `python3 scripts/generate-demo-screenshots.py` renders the README images from queries on that data.
 
 ## License
 
-This project is licensed under the MIT License. See the LICENSE file for details.
+MIT License. See [LICENSE](../LICENSE).

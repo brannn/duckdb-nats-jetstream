@@ -1,2 +1,2 @@
 nats-py>=2.7.0
-
+protobuf>=4.21
