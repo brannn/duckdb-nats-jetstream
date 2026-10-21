@@ -67,3 +67,6 @@ planning/
 demo.html
 demo-protobuf.html
 
+
+# clangd
+.cache/

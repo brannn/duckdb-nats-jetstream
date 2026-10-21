@@ -1,0 +1,57 @@
+# name: test/sql/integration/json.test
+# description: json_extract against the test/fixtures/jetstream store (make test_integration)
+# group: [nats_js]
+
+require nats_js
+
+require-env NATS_JS_TEST_URL
+
+# strings are unescaped, numbers keep the payload's digits, objects and arrays stay JSON, null is NULL
+query IIIIIIIIII
+SELECT seq, device_id, kw, big, tiny, location_zone, tags, note, name, status
+FROM nats_scan('events', url := '{NATS_JS_TEST_URL}', end_seq := 3,
+    json_extract := ['device_id', 'kw', 'big', 'tiny', 'location.zone', 'tags', 'note', 'name', 'status']);
+----
+1	pdu-1	42	9007199254740993	1e-7	z1	["a","b"]	he said "hi"	naïve	NULL
+2	pdu-2	1.5	NULL	NULL	z2	NULL	NULL	NULL	NULL
+3	crac-1	-3	NULL	NULL	NULL	NULL	NULL	NULL	NULL
+
+query II
+SELECT ok, location FROM nats_scan('events', url := '{NATS_JS_TEST_URL}', end_seq := 1, json_extract := ['ok', 'location']);
+----
+true	{"zone":"z1","rack":"r7"}
+
+# with json_extract the payload is VARCHAR: invalid UTF-8 reads as NULL, and non-JSON gives NULL fields
+query III
+SELECT seq, payload, device_id FROM nats_scan('events', url := '{NATS_JS_TEST_URL}', start_seq := 4, end_seq := 7,
+    json_extract := ['device_id']);
+----
+4	not json	NULL
+5	[{"id":1},{"id":2}]	NULL
+6	NULL	NULL
+7	(empty)	NULL
+
+# numeric path parts index arrays
+query II
+SELECT "0_id", "1" FROM nats_scan('events', url := '{NATS_JS_TEST_URL}', start_seq := 5, end_seq := 5,
+    json_extract := ['0.id', '1']);
+----
+1	{"id":2}
+
+# a key containing dots matches literally before it is read as a path
+query III
+SELECT a_b, a_c, a FROM nats_scan('events', url := '{NATS_JS_TEST_URL}', start_seq := 8, json_extract := ['a.b', 'a.c', 'a']);
+----
+literal	only nested	{"b":"nested","c":"only nested"}
+
+# a field named like a base column gets a suffix
+query III
+SELECT subject, subject_1, kw FROM nats_scan('events', url := '{NATS_JS_TEST_URL}', start_seq := 3, end_seq := 3,
+    json_extract := ['subject', 'kw']);
+----
+events.site1.cooling	from payload	-3
+
+query I
+SELECT sum(kw::DOUBLE) FROM nats_scan('events', url := '{NATS_JS_TEST_URL}', subject := 'events.*.power', json_extract := ['kw']);
+----
+43.5

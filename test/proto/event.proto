@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+package fixture;
+
+// Imports a well-known type and another file in this directory
+import "google/protobuf/timestamp.proto";
+import "reading.proto";
+
+message Event {
+  google.protobuf.Timestamp at = 1;
+  Part part = 2;
+  Kind kind = 3;
+}

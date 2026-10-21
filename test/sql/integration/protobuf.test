@@ -1,0 +1,58 @@
+# name: test/sql/integration/protobuf.test
+# description: proto_extract against the test/fixtures/jetstream store (make test_integration)
+# group: [nats_js]
+
+require nats_js
+
+require-env NATS_JS_TEST_URL
+
+# nested paths read through unset messages as NULL; a message field reads as JSON
+query IIIIIII
+SELECT device_id, timestamp, location_zone, metrics_kw, online, tags, location
+FROM nats_scan('proto', url := '{NATS_JS_TEST_URL}', subject := 'proto.telemetry',
+    proto_file := 'test/proto/telemetry.proto', proto_message := 'Telemetry',
+    proto_extract := ['device_id', 'timestamp', 'location.zone', 'metrics.kw', 'online', 'tags', 'location']);
+----
+pdu-1	1767225600000	z1	4.25	true	["critical","row-a"]	{"zone":"z1","rack":"r7","building":"b1"}
+pdu-2	0	NULL	0.5	false	[]	NULL
+
+query IIIIIIIIIIIIIIII
+SELECT * EXCLUDE (stream, subject, seq, ts_nats, payload)
+FROM nats_scan('proto', url := '{NATS_JS_TEST_URL}', subject := 'proto.types',
+    proto_file := 'test/proto/types_test.proto', proto_message := 'TypesTest',
+    proto_extract := ['str_field', 'bytes_field', 'int32_field', 'int64_field', 'uint32_field', 'uint64_field',
+                      'sint32_field', 'sint64_field', 'fixed32_field', 'fixed64_field', 'sfixed32_field',
+                      'sfixed64_field', 'float_field', 'double_field', 'bool_field', 'status_field']);
+----
+héllo	\x00\x01\xFF	-2147483648	-9223372036854775808	4294967295	18446744073709551615	-5	-6	7	8	-9	-10	0.1	2.5e-300	true	ACTIVE
+
+# repeated fields are JSON arrays and maps JSON objects; bytes are base64 and enums names.
+# Nested messages follow protobuf's JSON mapping, which quotes int64 values a double cannot hold.
+query IIIIIIIIIII
+SELECT id, values, parts, counters, level, raw, main, blobs, kinds, names, ratios
+FROM nats_scan('proto', url := '{NATS_JS_TEST_URL}', subject := 'proto.reading',
+    proto_file := 'test/proto/reading.proto', proto_message := 'Reading',
+    proto_extract := ['id', 'values', 'parts', 'counters', 'level', 'raw', 'main', 'blobs', 'kinds', 'names', 'ratios']);
+----
+r1	[0.1,-2.5,1e+300]	[{"name":"a","count":"9007199254740993"},{"name":"b\"q"}]	{"x":1}	0	\x00\xFF	{"name":"m","count":3}	["AQI=",""]	["KIND_A","KIND_B"]	["a\"b","c\\","ü"]	[0.1,1.5]
+r2	[]	[]	{}	NULL	(empty)	NULL	[]	[]	[]	[]
+
+query I
+SELECT bigs FROM nats_scan('proto', url := '{NATS_JS_TEST_URL}', subject := 'proto.reading', end_seq := 4,
+    proto_file := 'test/proto/reading.proto', proto_message := 'Reading', proto_extract := ['bigs']);
+----
+[9223372036854775807,-1]
+
+# a payload that does not parse gives NULL fields
+query II
+SELECT octet_length(payload), id FROM nats_scan('proto', url := '{NATS_JS_TEST_URL}', subject := 'proto.junk',
+    proto_file := 'test/proto/reading.proto', proto_message := 'Reading', proto_extract := ['id']);
+----
+3	NULL
+
+# a well-known type reads as protobuf's JSON for it, and its fields as columns
+query IIII
+SELECT "at", at_seconds, part_name, kind FROM nats_scan('proto', url := '{NATS_JS_TEST_URL}', subject := 'proto.event',
+    proto_file := 'test/proto/event.proto', proto_message := 'Event', proto_extract := ['at', 'at.seconds', 'part.name', 'kind']);
+----
+"2026-01-01T00:00:00.500Z"	1767225600	p	KIND_B
