@@ -20,7 +20,7 @@ jobs:
       duckdb_version: v2.0-cyanoptera
       ci_tools_version: v2.0-cyanoptera
       extension_name: nats_js
-      exclude_archs: 'linux_amd64_musl;windows_amd64_mingw'
+      exclude_archs: 'linux_amd64_musl;windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads'
       reduced_ci_mode: 'disabled'
       # fail, rather than skip, the tests when the extension does not load (see the Makefile)
       test_config: '{"test_env_variables": {"NATS_JS_FAIL_SKIPPED_TESTS": "1"}}'
