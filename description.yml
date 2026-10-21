@@ -1,17 +1,17 @@
 extension:
   name: nats_js
   description: Query NATS JetStream message streams directly with SQL
-  version: 0.2.1
+  version: 0.2.2
   language: C++
   build: cmake
   license: MIT
-  excluded_platforms: "linux_amd64_musl;windows_amd64_mingw"
+  excluded_platforms: "linux_amd64_musl;windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads"
   maintainers:
     - brannn
 
 repo:
   github: brannn/duckdb-nats-jetstream
-  ref: v0.2.1
+  ref: v0.2.2
 
 docs:
   hello_world: |
