@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+package fixture;
+
+// Repeated, map, optional and nested fields for the integration tests
+enum Kind {
+  KIND_UNSPECIFIED = 0;
+  KIND_A = 1;
+  KIND_B = 2;
+}
+
+message Part {
+  string name = 1;
+  int64 count = 2;
+}
+
+message Reading {
+  string id = 1;
+  repeated double values = 2;
+  repeated Part parts = 3;
+  map<string, int64> counters = 4;
+  optional int32 level = 5;
+  bytes raw = 6;
+  Part main = 7;
+  repeated bytes blobs = 8;
+  repeated Kind kinds = 9;
+  repeated string names = 10;
+  repeated float ratios = 11;
+  repeated int64 bigs = 12;
+}

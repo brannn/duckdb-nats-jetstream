@@ -119,3 +119,118 @@ statement error
 SELECT * FROM nats_scan('s', url := 'nats://127.0.0.1:1');
 ----
 Failed to connect to NATS
+
+# json_extract paths become underscored columns; names that repeat a column get a suffix
+query I
+SELECT column_name FROM (DESCRIBE SELECT * FROM nats_scan('s', json_extract := ['location.zone', 'subject', 'Seq', 'kw', 'kw']));
+----
+stream
+subject
+seq
+ts_nats
+payload
+location_zone
+subject_1
+Seq_1
+kw
+kw_1
+
+# repeated and map fields are JSON (VARCHAR), as is a message field; proto3 optional keeps its type
+query II
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM nats_scan('s',
+    proto_file := 'test/proto/reading.proto',
+    proto_message := 'Reading',
+    proto_extract := ['values', 'parts', 'counters', 'level', 'raw', 'main', 'main.count', 'kinds']))
+WHERE column_name NOT IN ('stream', 'subject', 'seq', 'ts_nats', 'payload');
+----
+values	VARCHAR
+parts	VARCHAR
+counters	VARCHAR
+level	INTEGER
+raw	BLOB
+main	VARCHAR
+main_count	BIGINT
+kinds	VARCHAR
+
+# imports resolve against the file's directory and protobuf's well-known types
+query II
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM nats_scan('s',
+    proto_file := 'test/proto/event.proto',
+    proto_message := 'Event',
+    proto_extract := ['at', 'at.seconds', 'part.count', 'kind']))
+WHERE column_name NOT IN ('stream', 'subject', 'seq', 'ts_nats', 'payload');
+----
+at	VARCHAR
+at_seconds	BIGINT
+part_count	BIGINT
+kind	VARCHAR
+
+statement error
+SELECT * FROM nats_scan('s', proto_file := 'test/proto/reading.proto', proto_message := 'Reading',
+    proto_extract := ['parts.name']);
+----
+Field 'parts' is repeated, cannot navigate to 'name'
+
+statement error
+SELECT * FROM nats_scan(NULL);
+----
+nats_scan: stream cannot be NULL
+
+statement error
+SELECT * FROM nats_scan('');
+----
+nats_scan: stream cannot be empty
+
+statement error
+SELECT * FROM nats_scan('s', subject := NULL);
+----
+nats_scan: subject cannot be NULL
+
+statement error
+SELECT * FROM nats_scan('s', start_seq := NULL);
+----
+nats_scan: start_seq cannot be NULL
+
+statement error
+SELECT * FROM nats_scan('s', end_time := NULL);
+----
+nats_scan: end_time cannot be NULL
+
+statement error
+SELECT * FROM nats_scan('s', json_extract := NULL);
+----
+nats_scan: json_extract cannot be NULL
+
+statement error
+SELECT * FROM nats_scan('s', json_extract := ['a', NULL]);
+----
+nats_scan: json_extract cannot contain NULL
+
+statement error
+SELECT * FROM nats_scan('s', proto_extract := ['']);
+----
+nats_scan: proto_extract cannot contain an empty field name
+
+statement error
+SELECT * FROM nats_scan('s', subject := 'a b');
+----
+nats_scan: invalid subject filter 'a b'
+
+statement error
+SELECT * FROM nats_scan('s', subject := 'a"b');
+----
+nats_scan: invalid subject filter
+
+# end_seq alone is a sequence range, so it does not mix with a time range either
+statement error
+SELECT * FROM nats_scan('s', end_seq := 5, end_time := TIMESTAMP '2026-01-01 00:00:00');
+----
+Cannot mix sequence-based
+
+statement ok
+SET enable_external_access = false;
+
+statement error
+SELECT * FROM nats_scan('s');
+----
+Permission Error: nats_scan is disabled because enable_external_access is false
