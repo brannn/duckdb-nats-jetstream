@@ -31,6 +31,12 @@ find_package(Protobuf CONFIG REQUIRED)
 target_link_libraries(${EXTENSION_NAME} cnats::nats_static protobuf::libprotobuf protobuf::libprotoc)
 target_link_libraries(${LOADABLE_EXTENSION_NAME} cnats::nats_static protobuf::libprotobuf protobuf::libprotoc)
 
+# Targets that link the static extension (DuckDB's shell, unittest and tools, compiled as C++11 on DuckDB 1.5) need its
+# libraries only to link. Passing on protobuf's C++17 requirement makes DuckDB >= 1.5.2 fail to link tools/plan_serializer.
+get_target_property(NATS_JS_INTERFACE_LIBS ${EXTENSION_NAME} INTERFACE_LINK_LIBRARIES)
+list(TRANSFORM NATS_JS_INTERFACE_LIBS REPLACE "^(.+)$" "$<LINK_ONLY:\\1>")
+set_target_properties(${EXTENSION_NAME} PROPERTIES INTERFACE_LINK_LIBRARIES "${NATS_JS_INTERFACE_LIBS}")
+
 # Install static library
 install(
   TARGETS ${EXTENSION_NAME}

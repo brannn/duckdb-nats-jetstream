@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [0.2.2] - 2026-10-21
+
+Maintenance release for DuckDB 1.5. Version 0.3.0 and later require DuckDB 2.0.
+
+### Changed
+- Build against DuckDB v1.5.6 and extension-ci-tools v1.5.6
+
+### Fixed
+- Build failure on DuckDB 1.5.2 and later: linking the extension passed protobuf's C++17 requirement on to DuckDB's `plan_serializer` tool, which then failed to link
+
+### Removed
+- WebAssembly builds: a browser cannot open the TCP connection to a NATS server
+
 ## [0.2.1] - 2026-03-30
 
 ### Added
