@@ -6,6 +6,7 @@
 #include "duckdb/main/secret/secret_manager.hpp"
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
+#include <cstring>
 #include <fstream>
 
 namespace duckdb {
