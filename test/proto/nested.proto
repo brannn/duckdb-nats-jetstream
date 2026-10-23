@@ -1,0 +1,11 @@
+syntax = "proto3";
+
+package fixture.nested;
+
+// A nested message type, for proto_message names
+message Outer {
+  message Inner {
+    string name = 1;
+  }
+  Inner inner = 1;
+}

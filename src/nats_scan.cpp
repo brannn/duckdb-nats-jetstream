@@ -217,6 +217,18 @@ static vector<const FieldDescriptor *> ResolveProtoPath(const Descriptor *root, 
     return fields;
 }
 
+// A message type by its name in the file's package ('Order', 'Order.Item'), or by its full name ('shop.Order'),
+// including types the file imports
+static const Descriptor *FindProtoMessage(const DescriptorPool &pool, const FileDescriptor &file, const string &name) {
+    if (!file.package().empty()) {
+        const Descriptor *descriptor = pool.FindMessageTypeByName(string(file.package()) + "." + name);
+        if (descriptor) {
+            return descriptor;
+        }
+    }
+    return pool.FindMessageTypeByName(name);
+}
+
 static string GetStringOption(const Value &value, const string &option) {
     if (value.IsNull()) {
         throw BinderException("nats_scan: %s cannot be NULL", option);
@@ -349,7 +361,7 @@ static unique_ptr<FunctionData> NatsScanBind(ClientContext &context, TableFuncti
             throw IOException(error_msg);
         }
 
-        const Descriptor *descriptor = file_desc->FindMessageTypeByName(bind_data->proto_message);
+        const Descriptor *descriptor = FindProtoMessage(*schema->pool, *file_desc, bind_data->proto_message);
         if (!descriptor) {
             throw BinderException("Message type '%s' not found in %s", bind_data->proto_message, bind_data->proto_file);
         }

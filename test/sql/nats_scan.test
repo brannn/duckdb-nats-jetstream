@@ -165,6 +165,47 @@ at_seconds	BIGINT
 part_count	BIGINT
 kind	VARCHAR
 
+# proto_message is a name in the file's package or a full name: nested, imported and well-known types too
+query II
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM nats_scan('s', proto_file := 'test/proto/nested.proto',
+    proto_message := 'Outer.Inner', proto_extract := ['name']))
+WHERE column_name = 'name';
+----
+name	VARCHAR
+
+query II
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM nats_scan('s', proto_file := 'test/proto/nested.proto',
+    proto_message := 'fixture.nested.Outer', proto_extract := ['inner.name']))
+WHERE column_name = 'inner_name';
+----
+inner_name	VARCHAR
+
+query II
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM nats_scan('s', proto_file := 'test/proto/event.proto',
+    proto_message := 'fixture.Event', proto_extract := ['kind']))
+WHERE column_name = 'kind';
+----
+kind	VARCHAR
+
+query II
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM nats_scan('s', proto_file := 'test/proto/event.proto',
+    proto_message := 'Part', proto_extract := ['count']))
+WHERE column_name = 'count';
+----
+count	BIGINT
+
+query II
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM nats_scan('s', proto_file := 'test/proto/event.proto',
+    proto_message := 'google.protobuf.Timestamp', proto_extract := ['seconds']))
+WHERE column_name = 'seconds';
+----
+seconds	BIGINT
+
+statement error
+SELECT * FROM nats_scan('s', proto_file := 'test/proto/nested.proto', proto_message := 'Inner', proto_extract := ['name']);
+----
+Message type 'Inner' not found
+
 statement error
 SELECT * FROM nats_scan('s', proto_file := 'test/proto/reading.proto', proto_message := 'Reading',
     proto_extract := ['parts.name']);
