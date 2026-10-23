@@ -1,11 +1,13 @@
 #include "nats_js_extension.hpp"
 #include "nats_scan.hpp"
+#include "nats_secret.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 
 namespace duckdb {
 
 void NatsJsExtension::Load(ExtensionLoader &loader) {
     NatsScanFunction::Register(loader);
+    NatsSecret::Register(loader);
 }
 
 std::string NatsJsExtension::Name() {

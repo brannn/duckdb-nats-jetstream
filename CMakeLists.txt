@@ -16,7 +16,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 include_directories(src/include)
 
 # Extension sources
-set(EXTENSION_SOURCES src/nats_scan.cpp src/nats_js_extension.cpp)
+set(EXTENSION_SOURCES src/nats_scan.cpp src/nats_secret.cpp src/nats_js_extension.cpp)
 
 # Build static and loadable extensions using DuckDB's build functions
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
@@ -32,8 +32,9 @@ find_package(Protobuf CONFIG REQUIRED)
 # Link dependencies - use plain signature to match DuckDB's build functions
 # cnats exports 'cnats::nats_static' target for static library
 # The .proto parser (compiler/importer.h) is part of libprotobuf; libprotoc holds only the code generators
-target_link_libraries(${EXTENSION_NAME} cnats::nats_static protobuf::libprotobuf)
-target_link_libraries(${LOADABLE_EXTENSION_NAME} cnats::nats_static protobuf::libprotobuf)
+# OpenSSL's crypto library derives NKey public keys (nats_secret.cpp)
+target_link_libraries(${EXTENSION_NAME} cnats::nats_static protobuf::libprotobuf OpenSSL::Crypto)
+target_link_libraries(${LOADABLE_EXTENSION_NAME} cnats::nats_static protobuf::libprotobuf OpenSSL::Crypto)
 
 # Install static library
 install(

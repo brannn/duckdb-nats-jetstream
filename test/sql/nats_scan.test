@@ -310,6 +310,65 @@ EXPLAIN SELECT * FROM nats_scan('s') WHERE seq > 3 OR seq < 2 OR subject = 'a.b'
 ----
 physical_plan	<!REGEX>:.*(Sequences|Subject).*
 
+# secrets of type nats: one way to sign in, plus TLS files; passwords and tokens are redacted
+statement ok
+CREATE SECRET prod (TYPE nats, USER 'alice', PASSWORD 's3cret', TLS_CA '/etc/nats/ca.pem', SCOPE 'tls://prod.example');
+
+statement ok
+CREATE SECRET dev (TYPE nats, TOKEN 't0ken');
+
+query II
+SELECT name, secret_string FROM duckdb_secrets() WHERE type = 'nats' ORDER BY name;
+----
+dev	name=dev;type=nats;provider=config;serializable=true;scope;token=redacted
+prod	name=prod;type=nats;provider=config;serializable=true;scope=tls://prod.example;password=redacted;tls_ca=/etc/nats/ca.pem;user=alice
+
+# a secret applies to URLs in its scope; one without a scope applies to every URL
+query II
+SELECT p.name, d.name FROM which_secret('tls://prod.example:4222', 'nats') p, which_secret('nats://localhost:4222', 'nats') d;
+----
+prod	dev
+
+statement error
+CREATE SECRET two (TYPE nats, TOKEN 't', CREDS '/etc/nats/user.creds');
+----
+A NATS secret takes one of USER and PASSWORD, TOKEN, CREDS or NKEY
+
+statement error
+CREATE SECRET half (TYPE nats, TLS_CERT '/etc/nats/client.pem');
+----
+A NATS secret takes TLS_CERT and TLS_KEY together
+
+statement error
+SELECT * FROM nats_scan('s', secret := 'missing');
+----
+nats_scan: no NATS secret named 'missing'
+
+statement ok
+CREATE SECRET web (TYPE http, BEARER_TOKEN 'x');
+
+statement error
+SELECT * FROM nats_scan('s', secret := 'web');
+----
+nats_scan: no NATS secret named 'web'
+
+# the secret's files are read when connecting
+statement ok
+CREATE SECRET broken (TYPE nats, TLS_CA 'test/proto/missing-ca.pem', SCOPE 'nats://127.0.0.1:1');
+
+statement error
+SELECT * FROM nats_scan('s', url := 'nats://127.0.0.1:1');
+----
+Cannot use NATS secret 'broken'
+
+statement ok
+CREATE SECRET bad_nkey (TYPE nats, NKEY 'test/proto/event.proto');
+
+statement error
+SELECT * FROM nats_scan('s', url := 'nats://127.0.0.1:1', secret := 'bad_nkey');
+----
+'test/proto/event.proto' does not hold a user NKey seed
+
 statement ok
 SET enable_external_access = false;
 

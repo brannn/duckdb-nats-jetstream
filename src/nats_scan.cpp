@@ -1,4 +1,5 @@
 #include "nats_scan.hpp"
+#include "nats_secret.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/parser/parsed_data/create_table_function_info.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
@@ -138,6 +139,7 @@ struct NatsScanBindData : public TableFunctionData {
     // Set by the subject option, which a WHERE clause does not override
     bool subject_given = false;
     string nats_url = "nats://localhost:4222";
+    NatsConnectionSettings connection;
     uint64_t start_seq = 0;
     uint64_t end_seq = NumericLimits<uint64_t>::Maximum();
     bool has_start_time = false;
@@ -309,12 +311,15 @@ static unique_ptr<FunctionData> NatsScanBind(ClientContext &context, TableFuncti
         throw BinderException("nats_scan: stream cannot be empty");
     }
 
+    string secret_name;
     for (auto &kv : input.named_parameters) {
         if (kv.first == "subject") {
             bind_data->subject_filter = GetStringOption(kv.second, "subject");
             bind_data->subject_given = true;
         } else if (kv.first == "url") {
             bind_data->nats_url = GetStringOption(kv.second, "url");
+        } else if (kv.first == "secret") {
+            secret_name = GetStringOption(kv.second, "secret");
         } else if (kv.first == "start_seq") {
             if (kv.second.IsNull()) {
                 throw BinderException("nats_scan: start_seq cannot be NULL");
@@ -347,6 +352,8 @@ static unique_ptr<FunctionData> NatsScanBind(ClientContext &context, TableFuncti
             bind_data->proto_fields = GetFieldListOption(kv.second, "proto_extract");
         }
     }
+
+    bind_data->connection = NatsSecret::Lookup(context, secret_name, bind_data->nats_url);
 
     if (!IsPlainSubject(bind_data->subject_filter)) {
         throw BinderException("nats_scan: invalid subject filter '%s'", bind_data->subject_filter);
@@ -935,6 +942,11 @@ static unique_ptr<GlobalTableFunctionState> NatsScanInitGlobal(ClientContext &co
         natsOptions_Destroy(opts);
         throw IOException("Invalid NATS URL '%s': %s", bind_data.nats_url, NatsErrorText(s));
     }
+    s = NatsSecret::Apply(bind_data.connection, opts);
+    if (s != NATS_OK) {
+        natsOptions_Destroy(opts);
+        throw IOException("Cannot use NATS secret '%s': %s", bind_data.connection.secret_name, NatsErrorText(s));
+    }
 
     s = natsConnection_Connect(&state->conn, opts);
     natsOptions_Destroy(opts);
@@ -1519,6 +1531,7 @@ void NatsScanFunction::Register(ExtensionLoader &loader) {
     nats_scan.GetSignature().WithTypedKwargs("options", [](TypedKwargs &options) {
         options.Add("subject", LogicalType(LogicalTypeId::VARCHAR));
         options.Add("url", LogicalType(LogicalTypeId::VARCHAR));
+        options.Add("secret", LogicalType(LogicalTypeId::VARCHAR));
         options.Add("start_seq", LogicalType(LogicalTypeId::UBIGINT));
         options.Add("end_seq", LogicalType(LogicalTypeId::UBIGINT));
         options.Add("start_time", LogicalType(LogicalTypeId::TIMESTAMP));
