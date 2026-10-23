@@ -9,6 +9,12 @@
 #include "duckdb/common/types/blob.hpp"
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/common/types/vector.hpp"
+#include "duckdb/execution/expression_executor.hpp"
+#include "duckdb/planner/expression/bound_between_expression.hpp"
+#include "duckdb/planner/expression/bound_columnref_expression.hpp"
+#include "duckdb/planner/expression/bound_comparison_expression.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
+#include "duckdb/planner/operator/logical_get.hpp"
 #include "utf8proc_wrapper.hpp"
 #include "yyjson.hpp"
 #include <nats/nats.h>
@@ -24,8 +30,10 @@
 #include <google/protobuf/struct.pb.h>
 #include <google/protobuf/timestamp.pb.h>
 #include <google/protobuf/wrappers.pb.h>
+#include <atomic>
 #include <cmath>
 #include <filesystem>
+#include <map>
 
 // Windows defines GetMessage as a macro (GetMessageA/GetMessageW)
 // This conflicts with protobuf's Reflection::GetMessage() method
@@ -40,6 +48,18 @@ using namespace google::protobuf::compiler;
 namespace duckdb {
 
 static constexpr int NATS_TIMEOUT_MS = 5000;
+// A batched read asks for this many messages or this many bytes, whichever comes first
+static constexpr idx_t NATS_BATCH_MSGS = STANDARD_VECTOR_SIZE;
+static constexpr idx_t NATS_BATCH_BYTES = 8 << 20;
+
+// The base columns, in order; field columns follow
+static constexpr idx_t COL_STREAM = 0;
+static constexpr idx_t COL_SUBJECT = 1;
+static constexpr idx_t COL_SEQ = 2;
+static constexpr idx_t COL_TS = 3;
+static constexpr idx_t COL_HEADERS = 4;
+static constexpr idx_t COL_PAYLOAD = 5;
+static constexpr idx_t COL_FIELDS = 6;
 
 class ProtobufErrorCollector : public MultiFileErrorCollector {
 public:
@@ -111,9 +131,12 @@ struct YyjsonDocDeleter {
 using YyjsonDoc = unique_ptr<yyjson_doc, YyjsonDocDeleter>;
 using YyjsonMutDoc = unique_ptr<yyjson_mut_doc, YyjsonDocDeleter>;
 
+// The range to read comes from the options, narrowed by the query's WHERE clause
 struct NatsScanBindData : public TableFunctionData {
     string stream_name;
     string subject_filter;
+    // Set by the subject option, which a WHERE clause does not override
+    bool subject_given = false;
     string nats_url = "nats://localhost:4222";
     uint64_t start_seq = 0;
     uint64_t end_seq = NumericLimits<uint64_t>::Maximum();
@@ -229,6 +252,16 @@ static const Descriptor *FindProtoMessage(const DescriptorPool &pool, const File
     return pool.FindMessageTypeByName(name);
 }
 
+// The filter is sent to the server inside a JSON request, so it must be a plain subject
+static bool IsPlainSubject(const string &subject) {
+    for (char c : subject) {
+        if (c == '"' || c == '\\' || StringUtil::CharacterIsSpace(c)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static string GetStringOption(const Value &value, const string &option) {
     if (value.IsNull()) {
         throw BinderException("nats_scan: %s cannot be NULL", option);
@@ -276,10 +309,10 @@ static unique_ptr<FunctionData> NatsScanBind(ClientContext &context, TableFuncti
         throw BinderException("nats_scan: stream cannot be empty");
     }
 
-    bool has_seq_range = false;
     for (auto &kv : input.named_parameters) {
         if (kv.first == "subject") {
             bind_data->subject_filter = GetStringOption(kv.second, "subject");
+            bind_data->subject_given = true;
         } else if (kv.first == "url") {
             bind_data->nats_url = GetStringOption(kv.second, "url");
         } else if (kv.first == "start_seq") {
@@ -287,13 +320,11 @@ static unique_ptr<FunctionData> NatsScanBind(ClientContext &context, TableFuncti
                 throw BinderException("nats_scan: start_seq cannot be NULL");
             }
             bind_data->start_seq = UBigIntValue::Get(kv.second);
-            has_seq_range = true;
         } else if (kv.first == "end_seq") {
             if (kv.second.IsNull()) {
                 throw BinderException("nats_scan: end_seq cannot be NULL");
             }
             bind_data->end_seq = UBigIntValue::Get(kv.second);
-            has_seq_range = true;
         } else if (kv.first == "start_time") {
             if (kv.second.IsNull()) {
                 throw BinderException("nats_scan: start_time cannot be NULL");
@@ -317,15 +348,8 @@ static unique_ptr<FunctionData> NatsScanBind(ClientContext &context, TableFuncti
         }
     }
 
-    // The filter is sent to the server inside a JSON request, so it must be a plain subject
-    for (char c : bind_data->subject_filter) {
-        if (c == '"' || c == '\\' || StringUtil::CharacterIsSpace(c)) {
-            throw BinderException("nats_scan: invalid subject filter '%s'", bind_data->subject_filter);
-        }
-    }
-
-    if (has_seq_range && (bind_data->has_start_time || bind_data->has_end_time)) {
-        throw BinderException("Cannot mix sequence-based (start_seq/end_seq) and time-based (start_time/end_time) parameters");
+    if (!IsPlainSubject(bind_data->subject_filter)) {
+        throw BinderException("nats_scan: invalid subject filter '%s'", bind_data->subject_filter);
     }
 
     auto &json_fields = bind_data->json_fields;
@@ -387,6 +411,10 @@ static unique_ptr<FunctionData> NatsScanBind(ClientContext &context, TableFuncti
     return_types.emplace_back(LogicalType(LogicalTypeId::UBIGINT));
     AddColumn(names, used_names, "ts_nats");
     return_types.emplace_back(LogicalType(LogicalTypeId::TIMESTAMP));
+    // A header can repeat, so each key maps to its values
+    AddColumn(names, used_names, "headers");
+    return_types.emplace_back(LogicalType::MAP(LogicalType(LogicalTypeId::VARCHAR),
+                                               LogicalType::LIST(LogicalType(LogicalTypeId::VARCHAR))));
 
     // BLOB unless json_extract is specified, to avoid validation errors on binary data
     AddColumn(names, used_names, "payload");
@@ -413,7 +441,8 @@ static unique_ptr<FunctionData> NatsScanBind(ClientContext &context, TableFuncti
     return std::move(bind_data);
 }
 
-// A stored message, from either a direct get (msg owns the buffers) or a STREAM.MSG.GET reply (decoded into the strings)
+// A stored message, from either a direct get (msg owns the buffers and headers) or a STREAM.MSG.GET reply (decoded
+// into the strings)
 struct NatsStoredMsg {
     uint64_t seq = 0;
     int64_t time_ns = 0;
@@ -425,6 +454,8 @@ struct NatsStoredMsg {
     natsMsg *msg = nullptr;
     string subject_buf;
     string data_buf;
+    // The message's header block, "NATS/1.0\r\nKey: Value\r\n...", when msg is not set
+    string headers_buf;
 
     void Clear() {
         if (msg != nullptr) {
@@ -438,21 +469,127 @@ struct NatsStoredMsg {
     }
 };
 
+// Headers the server adds to a direct get reply, which are not the message's own
+static bool IsReplyHeader(const char *key) {
+    static const char *const REPLY_HEADERS[] = {"Nats-Stream",      "Nats-Subject",       "Nats-Sequence",
+                                                "Nats-Time-Stamp",  "Nats-Num-Pending",   "Nats-Last-Sequence",
+                                                "Nats-UpTo-Sequence"};
+    for (auto reply_header : REPLY_HEADERS) {
+        if (strcmp(key, reply_header) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Keys in order, each with its values in the order they were sent
+using NatsHeaders = std::map<string, vector<Value>>;
+
+// A key that is not valid UTF-8 is left out, and a value that is not is NULL
+static void AddHeader(NatsHeaders &headers, string key, const char *value, idx_t value_len) {
+    if (key.empty() || !Utf8Proc::IsValid(key.c_str(), key.size())) {
+        return;
+    }
+    headers[std::move(key)].push_back(Utf8Proc::IsValid(value, value_len) ? Value(string(value, value_len))
+                                                                          : Value(LogicalType(LogicalTypeId::VARCHAR)));
+}
+
+static void ParseHeaderBlock(const string &block, NatsHeaders &headers) {
+    // The first line is the version, "NATS/1.0"; an empty line ends the block
+    auto line_end = block.find("\r\n");
+    while (line_end != string::npos) {
+        auto start = line_end + 2;
+        line_end = block.find("\r\n", start);
+        if (line_end == string::npos || line_end == start) {
+            break;
+        }
+        auto colon = block.find(':', start);
+        if (colon == string::npos || colon > line_end) {
+            continue;
+        }
+        auto value_start = colon + 1;
+        auto value_end = line_end;
+        while (value_start < value_end && (block[value_start] == ' ' || block[value_start] == '\t')) {
+            value_start++;
+        }
+        while (value_end > value_start && (block[value_end - 1] == ' ' || block[value_end - 1] == '\t')) {
+            value_end--;
+        }
+        AddHeader(headers, block.substr(start, colon - start), block.data() + value_start, value_end - value_start);
+    }
+}
+
+static Value HeadersValue(NatsStoredMsg &msg) {
+    NatsHeaders headers;
+    const char **keys = nullptr;
+    int key_count = 0;
+    if (msg.msg == nullptr) {
+        ParseHeaderBlock(msg.headers_buf, headers);
+    } else if (natsMsgHeader_Keys(msg.msg, &keys, &key_count) == NATS_OK) {
+        for (int i = 0; i < key_count; i++) {
+            const char **values = nullptr;
+            int value_count = 0;
+            if (IsReplyHeader(keys[i]) || natsMsgHeader_Values(msg.msg, keys[i], &values, &value_count) != NATS_OK) {
+                continue;
+            }
+            for (int j = 0; j < value_count; j++) {
+                AddHeader(headers, keys[i], values[j], strlen(values[j]));
+            }
+            free((void *)values);
+        }
+        free((void *)keys);
+    }
+
+    vector<Value> map_keys;
+    vector<Value> map_values;
+    for (auto &header : headers) {
+        map_keys.emplace_back(header.first);
+        map_values.push_back(Value::LIST(LogicalType(LogicalTypeId::VARCHAR), std::move(header.second)));
+    }
+    return Value::MAP(LogicalType(LogicalTypeId::VARCHAR), LogicalType::LIST(LogicalType(LogicalTypeId::VARCHAR)),
+                      std::move(map_keys), std::move(map_values));
+}
+
+// How messages are read: in batches (streams with allow_direct, on nats-server 2.11 or later), or one per request
+// through a direct get or, for streams without allow_direct, the JetStream API
+enum class NatsReadMode : uint8_t { BATCH, DIRECT_GET, MSG_GET };
+
 struct NatsScanGlobalState : public GlobalTableFunctionState {
     natsConnection *conn = nullptr;
     jsCtx *js = nullptr;
     jsStreamInfo *stream_info = nullptr;
-    bool allow_direct = false;
-    string msg_get_subject;
-    uint64_t next_seq = 1;
+    NatsReadMode mode = NatsReadMode::MSG_GET;
+    // $JS.API.DIRECT.GET.<stream> for batches, $JS.API.STREAM.MSG.GET.<stream> for the JetStream API
+    string get_subject;
+    natsInbox *inbox = nullptr;
+    natsSubscription *batch_sub = nullptr;
+    // A batch was requested and its end has not been read
+    bool batch_open = false;
+    idx_t batch_msgs = 0;
+
+    // The scan reads first_seq to last_seq; next_seq and done are also read by the progress bar
+    uint64_t first_seq = 1;
+    std::atomic<uint64_t> next_seq {1};
     uint64_t last_seq = 0;
-    bool done = false;
+    std::atomic<bool> done {false};
+
+    // Where each base and field column goes in the output, or INVALID_INDEX if the query does not use it
+    idx_t out_base[COL_FIELDS];
+    vector<idx_t> out_fields;
 
     shared_ptr<DynamicMessageFactory> proto_factory;
     const Message* proto_prototype = nullptr;
     util::JsonPrintOptions json_options;
 
     ~NatsScanGlobalState() {
+        if (batch_sub != nullptr) {
+            natsSubscription_Destroy(batch_sub);
+            batch_sub = nullptr;
+        }
+        if (inbox != nullptr) {
+            natsInbox_Destroy(inbox);
+            inbox = nullptr;
+        }
         if (stream_info != nullptr) {
             jsStreamInfo_Destroy(stream_info);
             stream_info = nullptr;
@@ -489,6 +626,16 @@ static string NatsErrorText(natsStatus s) {
     return result;
 }
 
+static void DecodeBase64(yyjson_val *encoded_val, string &out) {
+    out.clear();
+    if (!yyjson_is_str(encoded_val) || yyjson_get_len(encoded_val) == 0) {
+        return;
+    }
+    string_t encoded(yyjson_get_str(encoded_val), UnsafeNumericCast<uint32_t>(yyjson_get_len(encoded_val)));
+    out.resize(Blob::FromBase64Size(encoded));
+    Blob::FromBase64(encoded, data_ptr_cast(&out[0]), out.size());
+}
+
 // Parses a STREAM.MSG.GET reply. Returns false if the server found no message.
 static bool ParseMsgGetReply(natsMsg *reply, const string &stream_name, NatsStoredMsg &out) {
     YyjsonDoc doc(yyjson_read(natsMsg_GetData(reply), natsMsg_GetDataLength(reply), 0));
@@ -510,6 +657,7 @@ static bool ParseMsgGetReply(natsMsg *reply, const string &stream_name, NatsStor
     yyjson_val *seq = yyjson_obj_get(message, "seq");
     yyjson_val *time = yyjson_obj_get(message, "time");
     yyjson_val *data = yyjson_obj_get(message, "data");
+    yyjson_val *hdrs = yyjson_obj_get(message, "hdrs");
     timestamp_ns_t time_ns;
     if (!yyjson_is_str(subject) || !yyjson_is_uint(seq) || !yyjson_is_str(time) ||
         Timestamp::TryConvertTimestamp(yyjson_get_str(time), yyjson_get_len(time), time_ns, true) !=
@@ -520,12 +668,8 @@ static bool ParseMsgGetReply(natsMsg *reply, const string &stream_name, NatsStor
     out.seq = yyjson_get_uint(seq);
     out.time_ns = Timestamp::GetEpochNanoSeconds(time_ns);
     out.subject_buf.assign(yyjson_get_str(subject), yyjson_get_len(subject));
-    out.data_buf.clear();
-    if (yyjson_is_str(data) && yyjson_get_len(data) > 0) {
-        string_t encoded(yyjson_get_str(data), UnsafeNumericCast<uint32_t>(yyjson_get_len(data)));
-        out.data_buf.resize(Blob::FromBase64Size(encoded));
-        Blob::FromBase64(encoded, data_ptr_cast(&out.data_buf[0]), out.data_buf.size());
-    }
+    DecodeBase64(data, out.data_buf);
+    DecodeBase64(hdrs, out.headers_buf);
     out.subject = out.subject_buf.c_str();
     out.subject_len = out.subject_buf.size();
     out.data = out.data_buf.c_str();
@@ -538,7 +682,7 @@ static bool ParseMsgGetReply(natsMsg *reply, const string &stream_name, NatsStor
 static bool LoadNextMsg(NatsScanGlobalState &state, const string &stream_name, uint64_t seq, const string &filter,
                         NatsStoredMsg &out) {
     out.Clear();
-    if (state.allow_direct) {
+    if (state.mode == NatsReadMode::DIRECT_GET) {
         jsDirectGetMsgOptions opts;
         jsDirectGetMsgOptions_Init(&opts);
         opts.Sequence = seq;
@@ -567,7 +711,7 @@ static bool LoadNextMsg(NatsScanGlobalState &state, const string &stream_name, u
     // Streams without allow_direct only answer the JetStream API, which js_GetMsg exposes without next_by_subj
     string request = "{\"seq\":" + std::to_string(seq) + ",\"next_by_subj\":\"" + filter + "\"}";
     natsMsg *reply = nullptr;
-    natsStatus s = natsConnection_Request(&reply, state.conn, state.msg_get_subject.c_str(), request.c_str(),
+    natsStatus s = natsConnection_Request(&reply, state.conn, state.get_subject.c_str(), request.c_str(),
                                           UnsafeNumericCast<int>(request.size()), NATS_TIMEOUT_MS);
     if (s != NATS_OK) {
         throw IOException("nats_scan: failed to read stream '%s' at sequence %d: %s", stream_name, seq,
@@ -608,10 +752,166 @@ static bool FindFirstSeqAtTime(NatsScanGlobalState &state, const string &stream_
     return found;
 }
 
+// Batched reads: one direct get request returns up to a number of messages, then an end-of-batch status
+
+static void SendBatchRequest(NatsScanGlobalState &state, const string &stream_name, const string &request) {
+    natsStatus s = natsConnection_PublishRequest(state.conn, state.get_subject.c_str(), state.inbox, request.c_str(),
+                                                 UnsafeNumericCast<int>(request.size()));
+    if (s != NATS_OK) {
+        throw IOException("nats_scan: failed to read stream '%s': %s", stream_name, NatsErrorText(s));
+    }
+    state.batch_open = true;
+    state.batch_msgs = 0;
+}
+
+static bool GetUIntHeader(natsMsg *msg, const char *key, uint64_t &result) {
+    const char *value = nullptr;
+    if (natsMsgHeader_Get(msg, key, &value) != NATS_OK || value == nullptr || !StringUtil::CharacterIsDigit(*value)) {
+        return false;
+    }
+    char *end = nullptr;
+    errno = 0;
+    result = strtoull(value, &end, 10);
+    return errno == 0 && *end == '\0';
+}
+
+// Reads the open batch's next message. At the end of the batch, returns false with the number of matching messages
+// that follow it in the stream.
+static bool ReadBatchMsg(NatsScanGlobalState &state, const string &stream_name, NatsStoredMsg &out,
+                         uint64_t &pending) {
+    out.Clear();
+    natsStatus s = natsSubscription_NextMsg(&out.msg, state.batch_sub, NATS_TIMEOUT_MS);
+    if (s != NATS_OK) {
+        throw IOException("nats_scan: failed to read stream '%s': %s", stream_name, NatsErrorText(s));
+    }
+
+    const char *status = nullptr;
+    if (natsMsgHeader_Get(out.msg, "Status", &status) == NATS_OK) {
+        state.batch_open = false;
+        string code(status);
+        const char *description = nullptr;
+        natsMsgHeader_Get(out.msg, "Description", &description);
+        string text = description ? code + " " + description : code;
+        // An end of batch after no message would ask for the same batch again
+        bool more = code == "204" && state.batch_msgs > 0 && GetUIntHeader(out.msg, "Nats-Num-Pending", pending);
+        out.Clear();
+        if (code == "204" || code == "404") {
+            if (!more) {
+                pending = 0;
+            }
+            return false;
+        }
+        throw IOException("nats_scan: failed to read stream '%s': %s", stream_name, text);
+    }
+
+    const char *subject = nullptr;
+    const char *time = nullptr;
+    timestamp_ns_t time_ns;
+    if (!GetUIntHeader(out.msg, "Nats-Sequence", out.seq) ||
+        natsMsgHeader_Get(out.msg, "Nats-Subject", &subject) != NATS_OK ||
+        natsMsgHeader_Get(out.msg, "Nats-Time-Stamp", &time) != NATS_OK ||
+        Timestamp::TryConvertTimestamp(time, strlen(time), time_ns, true) != TimestampCastResult::SUCCESS) {
+        out.Clear();
+        throw IOException("nats_scan: invalid message get response from stream '%s'", stream_name);
+    }
+    out.time_ns = Timestamp::GetEpochNanoSeconds(time_ns);
+    out.subject = subject;
+    out.subject_len = strlen(subject);
+    out.data = natsMsg_GetData(out.msg);
+    out.data_len = UnsafeNumericCast<idx_t>(natsMsg_GetDataLength(out.msg));
+    if (out.data == nullptr) {
+        out.data = "";
+    }
+    state.batch_msgs++;
+
+    // A server without batched reads answers with this one message, and no end of batch follows
+    uint64_t unused;
+    if (!GetUIntHeader(out.msg, "Nats-Num-Pending", unused)) {
+        state.batch_open = false;
+    }
+    return true;
+}
+
+// Loads the scan's next message at or after next_seq. Returns false if there is none up to last_seq.
+static bool ReadNextMsg(NatsScanGlobalState &state, const string &stream_name, const string &filter,
+                        NatsStoredMsg &msg) {
+    if (state.mode != NatsReadMode::BATCH) {
+        return state.next_seq <= state.last_seq && LoadNextMsg(state, stream_name, state.next_seq, filter, msg);
+    }
+    while (true) {
+        if (!state.batch_open) {
+            uint64_t next_seq = state.next_seq;
+            if (next_seq > state.last_seq) {
+                return false;
+            }
+            auto batch = MinValue<uint64_t>(NATS_BATCH_MSGS, state.last_seq - next_seq + 1);
+            SendBatchRequest(state, stream_name,
+                             "{\"seq\":" + std::to_string(next_seq) + ",\"next_by_subj\":\"" + filter +
+                                 "\",\"batch\":" + std::to_string(batch) +
+                                 ",\"max_bytes\":" + std::to_string(NATS_BATCH_BYTES) + "}");
+        }
+        uint64_t pending = 0;
+        if (ReadBatchMsg(state, stream_name, msg, pending)) {
+            return true;
+        }
+        if (pending == 0) {
+            return false;
+        }
+    }
+}
+
+// The first message at or after the given time whose subject matches filter, which the server finds itself.
+// time_us must be from 1970 to 9999, the range the server reads.
+static bool FindFirstSeqAtTimeBatched(NatsScanGlobalState &state, const string &stream_name, int64_t time_us,
+                                      const string &filter, uint64_t &result) {
+    auto time = Timestamp::ToString(timestamp_t(time_us));
+    time[10] = 'T';
+    SendBatchRequest(state, stream_name,
+                     "{\"start_time\":\"" + time + "Z\",\"next_by_subj\":\"" + filter + "\",\"batch\":1}");
+    NatsStoredMsg msg;
+    uint64_t pending = 0;
+    bool found = false;
+    while (state.batch_open && ReadBatchMsg(state, stream_name, msg, pending)) {
+        if (!found) {
+            result = msg.seq;
+            found = true;
+        }
+    }
+    return found;
+}
+
+// Servers from 2.11 on report their API level in stream metadata; level 1 added batched direct gets
+static bool ServerReadsBatches(const jsStreamInfo &info) {
+    if (info.Config == nullptr) {
+        return false;
+    }
+    auto &metadata = info.Config->Metadata;
+    for (int i = 0; i < metadata.Count; i++) {
+        if (strcmp(metadata.List[2 * i], "_nats.level") == 0) {
+            return atoi(metadata.List[2 * i + 1]) >= 1;
+        }
+    }
+    return false;
+}
+
 static unique_ptr<GlobalTableFunctionState> NatsScanInitGlobal(ClientContext &context,
                                                                  TableFunctionInitInput &input) {
     auto &bind_data = input.bind_data->Cast<NatsScanBindData>();
     auto state = make_uniq<NatsScanGlobalState>();
+
+    std::fill_n(state->out_base, COL_FIELDS, DConstants::INVALID_INDEX);
+    state->out_fields.assign(bind_data.json_fields.size() + bind_data.proto_fields.size(), DConstants::INVALID_INDEX);
+    for (idx_t i = 0; i < input.column_ids.size(); i++) {
+        auto column_id = input.column_ids[i];
+        if (IsVirtualColumn(column_id)) {
+            continue;
+        }
+        if (column_id < COL_FIELDS) {
+            state->out_base[column_id] = i;
+        } else {
+            state->out_fields[column_id - COL_FIELDS] = i;
+        }
+    }
 
     if (bind_data.proto_descriptor != nullptr) {
         state->proto_factory = make_shared_ptr<DynamicMessageFactory>();
@@ -655,28 +955,59 @@ static unique_ptr<GlobalTableFunctionState> NatsScanInitGlobal(ClientContext &co
         throw IOException("Failed to get stream info for '%s': %s", bind_data.stream_name, NatsErrorText(s));
     }
 
-    state->allow_direct = state->stream_info->Config != nullptr && state->stream_info->Config->AllowDirect;
-    state->msg_get_subject = "$JS.API.STREAM.MSG.GET." + bind_data.stream_name;
+    bool allow_direct = state->stream_info->Config != nullptr && state->stream_info->Config->AllowDirect;
+    if (allow_direct && ServerReadsBatches(*state->stream_info)) {
+        state->mode = NatsReadMode::BATCH;
+        state->get_subject = "$JS.API.DIRECT.GET." + bind_data.stream_name;
+        s = natsInbox_Create(&state->inbox);
+        if (s == NATS_OK) {
+            s = natsConnection_SubscribeSync(&state->batch_sub, state->conn, state->inbox);
+        }
+        // A batch is bounded by NATS_BATCH_BYTES, but one message can be larger, so the library must not drop any
+        if (s == NATS_OK) {
+            s = natsSubscription_SetPendingLimits(state->batch_sub, -1, -1);
+        }
+        if (s != NATS_OK) {
+            throw IOException("Failed to subscribe for replies from NATS: %s", NatsErrorText(s));
+        }
+    } else if (allow_direct) {
+        state->mode = NatsReadMode::DIRECT_GET;
+    } else {
+        state->mode = NatsReadMode::MSG_GET;
+        state->get_subject = "$JS.API.STREAM.MSG.GET." + bind_data.stream_name;
+    }
 
     // The scan stops at the stream's last message as of now, so it ends on a busy stream
     auto &stream_state = state->stream_info->State;
-    if (stream_state.Msgs == 0) {
+    uint64_t next_seq = MaxValue<uint64_t>(MaxValue<uint64_t>(bind_data.start_seq, stream_state.FirstSeq), 1);
+    state->last_seq = MinValue<uint64_t>(bind_data.end_seq, stream_state.LastSeq);
+    if (stream_state.Msgs == 0 || next_seq > state->last_seq) {
         state->done = true;
         return std::move(state);
     }
-    state->next_seq = MaxValue<uint64_t>(MaxValue<uint64_t>(bind_data.start_seq, stream_state.FirstSeq), 1);
-    state->last_seq = MinValue<uint64_t>(bind_data.end_seq, stream_state.LastSeq);
 
     if (bind_data.has_start_time) {
-        uint64_t seq = 0;
-        if (!FindFirstSeqAtTime(*state, bind_data.stream_name, bind_data.start_time_us, state->next_seq,
-                                state->last_seq, seq)) {
+        // 1 January 10000, past the times the server reads
+        static constexpr int64_t TIME_LIMIT_US = 253402300800000000LL;
+        const string &filter = bind_data.subject_filter.empty() ? string(">") : bind_data.subject_filter;
+        uint64_t seq = next_seq;
+        bool found = true;
+        if (state->mode != NatsReadMode::BATCH) {
+            found = FindFirstSeqAtTime(*state, bind_data.stream_name, bind_data.start_time_us, next_seq,
+                                       state->last_seq, seq);
+        } else if (bind_data.start_time_us >= TIME_LIMIT_US) {
+            found = false;
+        } else if (bind_data.start_time_us > 0) {
+            found = FindFirstSeqAtTimeBatched(*state, bind_data.stream_name, bind_data.start_time_us, filter, seq);
+        }
+        if (!found) {
             state->done = true;
             return std::move(state);
         }
-        state->next_seq = seq;
+        next_seq = MaxValue<uint64_t>(next_seq, seq);
     }
-
+    state->first_seq = next_seq;
+    state->next_seq = next_seq;
     return std::move(state);
 }
 
@@ -899,6 +1230,15 @@ static Value ExtractProtobufValue(const Message &root, const vector<const FieldD
     }
 }
 
+// A writer for the output column, or none if the query does not use the column
+template <class T>
+static unique_ptr<VectorScatterWriter<T>> ColumnWriter(DataChunk &output, idx_t out_idx) {
+    if (out_idx == DConstants::INVALID_INDEX) {
+        return nullptr;
+    }
+    return make_uniq<VectorScatterWriter<T>>(output.data[out_idx]);
+}
+
 static void NatsScanExecute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
     auto &bind_data = data_p.bind_data->Cast<NatsScanBindData>();
     auto &global_state = data_p.global_state->Cast<NatsScanGlobalState>();
@@ -912,22 +1252,26 @@ static void NatsScanExecute(ClientContext &context, TableFunctionInput &data_p, 
     const idx_t max_rows = STANDARD_VECTOR_SIZE;
     const string &filter = bind_data.subject_filter.empty() ? string(">") : bind_data.subject_filter;
     const bool payload_is_text = !bind_data.json_fields.empty();
-
-    unique_ptr<Message> proto_msg;
-    if (global_state.proto_prototype != nullptr) {
-        proto_msg.reset(global_state.proto_prototype->New());
-    }
+    const idx_t headers_idx = global_state.out_base[COL_HEADERS];
+    auto &out_fields = global_state.out_fields;
 
     // Direct writes (avoids per-cell virtual dispatch via SetValue)
-    auto stream_data = FlatVector::ScatterWriter<string_t>(output.data[0]);
-    auto subject_data = FlatVector::ScatterWriter<string_t>(output.data[1]);
-    auto seq_data = FlatVector::ScatterWriter<uint64_t>(output.data[2]);
-    auto ts_data = FlatVector::ScatterWriter<timestamp_t>(output.data[3]);
-    auto payload_data = FlatVector::ScatterWriter<string_t>(output.data[4]);
-    vector<VectorScatterWriter<string_t>> json_data;
-    json_data.reserve(bind_data.json_fields.size());
+    auto stream_data = ColumnWriter<string_t>(output, global_state.out_base[COL_STREAM]);
+    auto subject_data = ColumnWriter<string_t>(output, global_state.out_base[COL_SUBJECT]);
+    auto seq_data = ColumnWriter<uint64_t>(output, global_state.out_base[COL_SEQ]);
+    auto ts_data = ColumnWriter<timestamp_t>(output, global_state.out_base[COL_TS]);
+    auto payload_data = ColumnWriter<string_t>(output, global_state.out_base[COL_PAYLOAD]);
+    vector<unique_ptr<VectorScatterWriter<string_t>>> json_data;
+    bool read_json = false;
     for (idx_t i = 0; i < bind_data.json_fields.size(); i++) {
-        json_data.push_back(FlatVector::ScatterWriter<string_t>(output.data[5 + i]));
+        json_data.push_back(ColumnWriter<string_t>(output, out_fields[i]));
+        read_json = read_json || json_data.back();
+    }
+
+    unique_ptr<Message> proto_msg;
+    if (global_state.proto_prototype != nullptr &&
+        std::any_of(out_fields.begin(), out_fields.end(), [](idx_t i) { return i != DConstants::INVALID_INDEX; })) {
+        proto_msg.reset(global_state.proto_prototype->New());
     }
 
     NatsStoredMsg msg;
@@ -936,33 +1280,46 @@ static void NatsScanExecute(ClientContext &context, TableFunctionInput &data_p, 
             break;
         }
 
-        if (global_state.next_seq > global_state.last_seq ||
-            !LoadNextMsg(global_state, bind_data.stream_name, global_state.next_seq, filter, msg) ||
-            msg.seq > global_state.last_seq ||
+        if (!ReadNextMsg(global_state, bind_data.stream_name, filter, msg) || msg.seq > global_state.last_seq ||
             (bind_data.has_end_time && msg.time_ns / 1000 > bind_data.end_time_us)) {
             global_state.done = true;
             break;
         }
         global_state.next_seq = msg.seq + 1;
 
-        stream_data[count] = string_t(bind_data.stream_name.c_str(), UnsafeNumericCast<uint32_t>(bind_data.stream_name.size()));
-        subject_data[count] = string_t(msg.subject, UnsafeNumericCast<uint32_t>(msg.subject_len));
-        seq_data[count] = msg.seq;
-        ts_data[count] = timestamp_t(msg.time_ns / 1000); // nanos -> micros
-
-        // A VARCHAR payload must be valid UTF-8; binary payloads are NULL there
-        if (payload_is_text && !Utf8Proc::IsValid(msg.data, msg.data_len)) {
-            payload_data.SetInvalid(count);
-        } else {
-            payload_data[count] = string_t(msg.data, UnsafeNumericCast<uint32_t>(msg.data_len));
+        if (stream_data) {
+            (*stream_data)[count] =
+                string_t(bind_data.stream_name.c_str(), UnsafeNumericCast<uint32_t>(bind_data.stream_name.size()));
+        }
+        if (subject_data) {
+            (*subject_data)[count] = string_t(msg.subject, UnsafeNumericCast<uint32_t>(msg.subject_len));
+        }
+        if (seq_data) {
+            (*seq_data)[count] = msg.seq;
+        }
+        if (ts_data) {
+            (*ts_data)[count] = timestamp_t(msg.time_ns / 1000); // nanos -> micros
+        }
+        if (headers_idx != DConstants::INVALID_INDEX) {
+            output.data[headers_idx].SetValue(count, HeadersValue(msg));
         }
 
-        if (!bind_data.json_fields.empty()) {
+        // A VARCHAR payload must be valid UTF-8; binary payloads are NULL there
+        if (payload_data && payload_is_text && !Utf8Proc::IsValid(msg.data, msg.data_len)) {
+            payload_data->SetInvalid(count);
+        } else if (payload_data) {
+            (*payload_data)[count] = string_t(msg.data, UnsafeNumericCast<uint32_t>(msg.data_len));
+        }
+
+        if (read_json) {
             YyjsonDoc doc(yyjson_read(msg.data, msg.data_len, YYJSON_READ_NUMBER_AS_RAW));
             yyjson_val *root = doc ? yyjson_doc_get_root(doc.get()) : nullptr;
             for (idx_t i = 0; i < bind_data.json_fields.size(); i++) {
+                if (!json_data[i]) {
+                    continue;
+                }
                 yyjson_val *val = root ? LookupJsonPath(root, bind_data.json_fields[i], bind_data.json_paths[i]) : nullptr;
-                WriteJsonValue(val, json_data[i], count);
+                WriteJsonValue(val, *json_data[i], count);
             }
         }
 
@@ -971,7 +1328,10 @@ static void NatsScanExecute(ClientContext &context, TableFunctionInput &data_p, 
             bool parse_success = proto_msg->ParseFromArray(msg.data, UnsafeNumericCast<int>(msg.data_len));
 
             for (idx_t i = 0; i < bind_data.proto_fields.size(); i++) {
-                idx_t col_idx = 5 + i;
+                idx_t col_idx = out_fields[i];
+                if (col_idx == DConstants::INVALID_INDEX) {
+                    continue;
+                }
                 if (parse_success) {
                     output.data[col_idx].SetValue(count, ExtractProtobufValue(*proto_msg, bind_data.proto_paths[i],
                                                                               global_state.json_options));
@@ -987,10 +1347,174 @@ static void NatsScanExecute(ClientContext &context, TableFunctionInput &data_p, 
     output.SetChildCardinality(count);
 }
 
+// Filter pushdown: a WHERE clause on seq, ts_nats or subject narrows the range the scan reads. DuckDB still applies
+// every filter to the rows, so a filter only has to describe a range that contains its rows.
+
+// The scan column an expression is, or INVALID_INDEX if it is something else
+static idx_t FilterColumn(const LogicalGet &get, const Expression &expr) {
+    if (expr.GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) {
+        return DConstants::INVALID_INDEX;
+    }
+    auto &binding = expr.Cast<BoundColumnRefExpression>().Binding();
+    if (binding.table_index != get.table_index) {
+        return DConstants::INVALID_INDEX;
+    }
+    auto &column_index = get.GetColumnIndex(binding);
+    return column_index.IsVirtualColumn() ? DConstants::INVALID_INDEX : column_index.GetPrimaryIndex();
+}
+
+static bool FilterConstant(ClientContext &context, const Expression &expr, Value &result) {
+    return expr.IsFoldable() && ExpressionExecutor::TryEvaluateScalar(context, expr, result) && !result.IsNull();
+}
+
+// Narrows the range by "column <comparison> constant"
+static void PushdownComparison(NatsScanBindData &bind_data, idx_t column, ExpressionType comparison,
+                               const Value &constant) {
+    bool lower = comparison == ExpressionType::COMPARE_EQUAL || comparison == ExpressionType::COMPARE_GREATERTHAN ||
+                 comparison == ExpressionType::COMPARE_GREATERTHANOREQUALTO;
+    bool upper = comparison == ExpressionType::COMPARE_EQUAL || comparison == ExpressionType::COMPARE_LESSTHAN ||
+                 comparison == ExpressionType::COMPARE_LESSTHANOREQUALTO;
+    bool strict = comparison == ExpressionType::COMPARE_GREATERTHAN || comparison == ExpressionType::COMPARE_LESSTHAN;
+
+    if (column == COL_SEQ && constant.type().id() == LogicalTypeId::UBIGINT) {
+        auto seq = UBigIntValue::Get(constant);
+        if (strict && (lower ? seq == NumericLimits<uint64_t>::Maximum() : seq == 0)) {
+            // Nothing is greater than the largest sequence or less than 0
+            bind_data.start_seq = NumericLimits<uint64_t>::Maximum();
+            bind_data.end_seq = 0;
+            return;
+        }
+        seq = strict ? (lower ? seq + 1 : seq - 1) : seq;
+        if (lower) {
+            bind_data.start_seq = MaxValue(bind_data.start_seq, seq);
+        }
+        if (upper) {
+            bind_data.end_seq = MinValue(bind_data.end_seq, seq);
+        }
+    } else if (column == COL_TS && constant.type().id() == LogicalTypeId::TIMESTAMP) {
+        auto time_us = TimestampValue::Get(constant).value;
+        if (strict && (time_us == NumericLimits<int64_t>::Maximum() || time_us == NumericLimits<int64_t>::Minimum())) {
+            return;
+        }
+        time_us = strict ? (lower ? time_us + 1 : time_us - 1) : time_us;
+        if (lower && (!bind_data.has_start_time || time_us > bind_data.start_time_us)) {
+            bind_data.start_time_us = time_us;
+            bind_data.has_start_time = true;
+        }
+        if (upper && (!bind_data.has_end_time || time_us < bind_data.end_time_us)) {
+            bind_data.end_time_us = time_us;
+            bind_data.has_end_time = true;
+        }
+    } else if (column == COL_SUBJECT && comparison == ExpressionType::COMPARE_EQUAL && !bind_data.subject_given) {
+        auto subject = StringValue::Get(constant);
+        if (!subject.empty() && IsPlainSubject(subject)) {
+            bind_data.subject_filter = subject;
+        }
+    }
+}
+
+static void PushdownFilter(ClientContext &context, const LogicalGet &get, NatsScanBindData &bind_data,
+                           const Expression &filter) {
+    if (filter.GetExpressionClass() != ExpressionClass::BOUND_FUNCTION) {
+        return;
+    }
+    auto &function = filter.Cast<BoundFunctionExpression>();
+    Value constant;
+    if (filter.GetExpressionType() == ExpressionType::COMPARE_BETWEEN) {
+        if (!BoundBetweenExpression::HasValidBindData(function)) {
+            return;
+        }
+        auto column = FilterColumn(get, BoundBetweenExpression::Input(function));
+        if (column == DConstants::INVALID_INDEX) {
+            return;
+        }
+        if (FilterConstant(context, BoundBetweenExpression::LowerBound(function), constant)) {
+            PushdownComparison(bind_data, column, BoundBetweenExpression::LowerComparisonType(function), constant);
+        }
+        if (FilterConstant(context, BoundBetweenExpression::UpperBound(function), constant)) {
+            PushdownComparison(bind_data, column, BoundBetweenExpression::UpperComparisonType(function), constant);
+        }
+    } else if (BoundComparisonExpression::IsComparison(filter)) {
+        auto comparison = filter.GetExpressionType();
+        auto &left = BoundComparisonExpression::Left(function);
+        auto &right = BoundComparisonExpression::Right(function);
+        auto column = FilterColumn(get, left);
+        if (column != DConstants::INVALID_INDEX && FilterConstant(context, right, constant)) {
+            PushdownComparison(bind_data, column, comparison, constant);
+        } else if ((column = FilterColumn(get, right)) != DConstants::INVALID_INDEX &&
+                   FilterConstant(context, left, constant)) {
+            PushdownComparison(bind_data, column, FlipComparisonExpression(comparison), constant);
+        }
+    } else {
+        // subject LIKE 'orders.eu.%' arrives as a prefix, which the subject filter orders.eu.> contains
+        auto &name = function.Function().GetName();
+        if ((name == "prefix" || name == "starts_with") && function.GetChildren().size() == 2 &&
+            FilterColumn(get, *function.GetChildren()[0]) == COL_SUBJECT && bind_data.subject_filter.empty() &&
+            FilterConstant(context, *function.GetChildren()[1], constant)) {
+            auto prefix = StringValue::Get(constant);
+            if (prefix.size() > 1 && prefix.back() == '.' && IsPlainSubject(prefix)) {
+                bind_data.subject_filter = prefix + ">";
+            }
+        }
+    }
+}
+
+static void NatsScanPushdownComplexFilter(ClientContext &context, LogicalGet &get, FunctionData *bind_data_p,
+                                          vector<unique_ptr<Expression>> &filters) {
+    auto &bind_data = bind_data_p->Cast<NatsScanBindData>();
+    for (auto &filter : filters) {
+        PushdownFilter(context, get, bind_data, *filter);
+    }
+}
+
+// The share of the sequence range read so far
+static double NatsScanProgress(ClientContext &context, const FunctionData *bind_data,
+                               const GlobalTableFunctionState *global_state) {
+    auto &state = global_state->Cast<NatsScanGlobalState>();
+    if (state.done) {
+        return 100.0;
+    }
+    uint64_t next_seq = state.next_seq;
+    if (state.last_seq < state.first_seq || next_seq <= state.first_seq) {
+        return 0.0;
+    }
+    return 100.0 * double(next_seq - state.first_seq) / double(state.last_seq - state.first_seq + 1);
+}
+
+// The range a query reads, in EXPLAIN
+static InsertionOrderPreservingMap<string> NatsScanToString(TableFunctionToStringInput &input) {
+    auto &bind_data = input.bind_data->Cast<NatsScanBindData>();
+    InsertionOrderPreservingMap<string> result;
+    result["Stream"] = bind_data.stream_name;
+    if (!bind_data.subject_filter.empty()) {
+        result["Subject"] = bind_data.subject_filter;
+    }
+    if (bind_data.start_seq > 0 || bind_data.end_seq < NumericLimits<uint64_t>::Maximum()) {
+        string range = bind_data.start_seq > 0 ? "from " + std::to_string(bind_data.start_seq) : "";
+        if (bind_data.end_seq < NumericLimits<uint64_t>::Maximum()) {
+            range += string(range.empty() ? "" : " ") + "to " + std::to_string(bind_data.end_seq);
+        }
+        result["Sequences"] = range;
+    }
+    if (bind_data.has_start_time || bind_data.has_end_time) {
+        string range =
+            bind_data.has_start_time ? "from " + Timestamp::ToString(timestamp_t(bind_data.start_time_us)) : "";
+        if (bind_data.has_end_time) {
+            range += string(range.empty() ? "" : " ") + "to " + Timestamp::ToString(timestamp_t(bind_data.end_time_us));
+        }
+        result["Times"] = range;
+    }
+    return result;
+}
+
 void NatsScanFunction::Register(ExtensionLoader &loader) {
     TableFunction nats_scan(Identifier("nats_scan"),
                             FunctionSignature().AddPositionalOnly("stream", LogicalType(LogicalTypeId::VARCHAR)),
                             NatsScanExecute, NatsScanBind, NatsScanInitGlobal, NatsScanInitLocal);
+    nats_scan.projection_pushdown = true;
+    nats_scan.pushdown_complex_filter = NatsScanPushdownComplexFilter;
+    nats_scan.table_scan_progress = NatsScanProgress;
+    nats_scan.to_string = NatsScanToString;
 
     nats_scan.GetSignature().WithTypedKwargs("options", [](TypedKwargs &options) {
         options.Add("subject", LogicalType(LogicalTypeId::VARCHAR));

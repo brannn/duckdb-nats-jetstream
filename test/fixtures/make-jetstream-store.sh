@@ -70,6 +70,22 @@ pub_proto proto.reading reading.proto fixture.Reading 'id: "r2"'
 printf '\xff\xff\xff' | n pub --force-stdin proto.junk > /dev/null 2>&1
 pub_proto proto.event event.proto fixture.Event 'at { seconds: 1767225600 nanos: 500000000 } part { name: "p" count: 2 } kind: KIND_B'
 
+add_streams_0_4() {
+    # hdrs and hdrs_api: messages with and without headers, read in batches and through the JetStream API
+    n stream add hdrs --subjects 'hdrs.>' --storage file --allow-direct --defaults > /dev/null
+    n stream add hdrs_api --subjects 'hdrs_api.>' --storage file --no-allow-direct --defaults > /dev/null
+    for s in hdrs hdrs_api; do
+        pub "$s.a" '{"n":1}' -H 'Nats-Msg-Id:m1' -H 'X-Trace:t1' -H 'X-Trace:t2'
+        pub "$s.a" '{"n":2}'
+        pub "$s.b" '{"n":3}' -H 'Content-Type:application/json'
+    done
+
+    # many: more messages than two batches hold
+    n stream add many --subjects 'many.>' --storage file --allow-direct --defaults > /dev/null
+    n pub many.x '{"i":{{Count}}}' --count 4100 > /dev/null 2>&1
+}
+add_streams_0_4
+
 kill "$SERVER"
 wait "$SERVER" 2>/dev/null || true
 rm -rf test/fixtures/jetstream

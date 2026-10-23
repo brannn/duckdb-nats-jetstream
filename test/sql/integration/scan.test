@@ -128,6 +128,72 @@ WHERE ts_nats BETWEEN TIMESTAMP '2026-10-21 23:05:29.085244' AND TIMESTAMP '2026
 ----
 [2, 3, 7]
 
+# WHERE clauses on seq, ts_nats and subject narrow the read, and give the same rows as the options
+query I
+SELECT list(seq ORDER BY seq) FROM nats_scan('gaps', url := '{NATS_JS_TEST_URL}') WHERE seq > 2 AND seq <= 8;
+----
+[3, 7, 8]
+
+query I
+SELECT list(seq ORDER BY seq) FROM nats_scan('gaps', url := '{NATS_JS_TEST_URL}', start_seq := 3)
+WHERE ts_nats > TIMESTAMP '2026-10-21 23:05:29.085244' AND ts_nats <= TIMESTAMP '2026-10-21 23:05:30.28116';
+----
+[3, 7]
+
+# sequence and time options combine
+query I
+SELECT list(seq) FROM nats_scan('gaps', url := '{NATS_JS_TEST_URL}', start_seq := 3,
+    end_time := TIMESTAMP '2026-10-21 23:05:30.28116');
+----
+[3, 7]
+
+query I
+SELECT list(seq ORDER BY seq) FROM nats_scan('events', url := '{NATS_JS_TEST_URL}') WHERE subject = 'events.site1.power';
+----
+[1, 4, 8]
+
+query I
+SELECT list(seq ORDER BY seq) FROM nats_scan('events', url := '{NATS_JS_TEST_URL}') WHERE subject LIKE 'events.site1.%';
+----
+[1, 3, 4, 8]
+
+query I
+SELECT list(seq ORDER BY seq) FROM nats_scan('events', url := '{NATS_JS_TEST_URL}', subject := 'events.*.power')
+WHERE subject = 'events.site1.power';
+----
+[1, 4, 8]
+
+# a start time with a subject filter begins at the first matching message
+query I
+SELECT list(seq) FROM nats_scan('events', url := '{NATS_JS_TEST_URL}', subject := 'events.site1.power',
+    start_time := TIMESTAMP '2026-10-21 23:05:28.755481');
+----
+[4, 8]
+
+# a long stream is read in several batches
+query III
+SELECT count(*), min(seq), max(seq) FROM nats_scan('many', url := '{NATS_JS_TEST_URL}');
+----
+4100	1	4100
+
+query I
+SELECT count(*) FROM nats_scan('many', url := '{NATS_JS_TEST_URL}', start_seq := 2000, end_seq := 4099);
+----
+2100
+
+query II
+SELECT count(*), sum(i::INTEGER) FROM nats_scan('many', url := '{NATS_JS_TEST_URL}', json_extract := ['i'])
+WHERE seq > 4000;
+----
+100	405050
+
+query I
+SELECT seq FROM nats_scan('many', url := '{NATS_JS_TEST_URL}') LIMIT 3;
+----
+1
+2
+3
+
 # streams without allow_direct are read through the JetStream API
 query III
 SELECT seq, subject, decode(payload) FROM nats_scan('api_only', url := '{NATS_JS_TEST_URL}');

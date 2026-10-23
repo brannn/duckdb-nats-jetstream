@@ -12,6 +12,7 @@ stream	VARCHAR
 subject	VARCHAR
 seq	UBIGINT
 ts_nats	TIMESTAMP
+headers	MAP(VARCHAR, VARCHAR[])
 payload	BLOB
 
 query II
@@ -21,6 +22,7 @@ stream	VARCHAR
 subject	VARCHAR
 seq	UBIGINT
 ts_nats	TIMESTAMP
+headers	MAP(VARCHAR, VARCHAR[])
 payload	VARCHAR
 device_id	VARCHAR
 kw	VARCHAR
@@ -33,7 +35,7 @@ SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM nats_scan('s',
     proto_extract := ['str_field', 'bytes_field', 'int32_field', 'int64_field', 'uint32_field', 'uint64_field',
                       'sint32_field', 'sint64_field', 'fixed32_field', 'fixed64_field', 'sfixed32_field',
                       'sfixed64_field', 'float_field', 'double_field', 'bool_field', 'status_field']))
-WHERE column_name NOT IN ('stream', 'subject', 'seq', 'ts_nats');
+WHERE column_name NOT IN ('stream', 'subject', 'seq', 'ts_nats', 'headers');
 ----
 payload	BLOB
 str_field	VARCHAR
@@ -59,7 +61,7 @@ SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM nats_scan('s',
     proto_file := 'test/proto/telemetry.proto',
     proto_message := 'Telemetry',
     proto_extract := ['device_id', 'location.zone', 'metrics.kw', 'tags']))
-WHERE column_name NOT IN ('stream', 'subject', 'seq', 'ts_nats', 'payload');
+WHERE column_name NOT IN ('stream', 'subject', 'seq', 'ts_nats', 'headers', 'payload');
 ----
 device_id	VARCHAR
 location_zone	VARCHAR
@@ -105,11 +107,6 @@ SELECT * FROM nats_scan('s', json_extract := ['a'], proto_extract := ['b']);
 Cannot use both json_extract and proto_extract parameters
 
 statement error
-SELECT * FROM nats_scan('s', start_seq := 1, start_time := TIMESTAMP '2026-01-01 00:00:00');
-----
-Cannot mix sequence-based (start_seq/end_seq) and time-based (start_time/end_time) parameters
-
-statement error
 SELECT * FROM nats_scan('s', unknown_option := 1);
 ----
 unknown_option
@@ -128,6 +125,7 @@ stream
 subject
 seq
 ts_nats
+headers
 payload
 location_zone
 subject_1
@@ -141,7 +139,7 @@ SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM nats_scan('s',
     proto_file := 'test/proto/reading.proto',
     proto_message := 'Reading',
     proto_extract := ['values', 'parts', 'counters', 'level', 'raw', 'main', 'main.count', 'kinds']))
-WHERE column_name NOT IN ('stream', 'subject', 'seq', 'ts_nats', 'payload');
+WHERE column_name NOT IN ('stream', 'subject', 'seq', 'ts_nats', 'headers', 'payload');
 ----
 values	VARCHAR
 parts	VARCHAR
@@ -158,7 +156,7 @@ SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM nats_scan('s',
     proto_file := 'test/proto/event.proto',
     proto_message := 'Event',
     proto_extract := ['at', 'at.seconds', 'part.count', 'kind']))
-WHERE column_name NOT IN ('stream', 'subject', 'seq', 'ts_nats', 'payload');
+WHERE column_name NOT IN ('stream', 'subject', 'seq', 'ts_nats', 'headers', 'payload');
 ----
 at	VARCHAR
 at_seconds	BIGINT
@@ -262,11 +260,55 @@ SELECT * FROM nats_scan('s', subject := 'a"b');
 ----
 nats_scan: invalid subject filter
 
-# end_seq alone is a sequence range, so it does not mix with a time range either
-statement error
-SELECT * FROM nats_scan('s', end_seq := 5, end_time := TIMESTAMP '2026-01-01 00:00:00');
+# WHERE clauses on seq, ts_nats and subject narrow the range the scan reads, which EXPLAIN shows
+query II
+EXPLAIN SELECT * FROM nats_scan('s') WHERE seq BETWEEN 3 AND 8;
 ----
-Cannot mix sequence-based
+physical_plan	<REGEX>:.*Sequences: from 3 to 8.*
+
+query II
+EXPLAIN SELECT * FROM nats_scan('s', start_seq := 5) WHERE seq > 2 AND 20 > seq;
+----
+physical_plan	<REGEX>:.*Sequences: from 5 to 19.*
+
+query II
+EXPLAIN SELECT * FROM nats_scan('s') WHERE seq = 7;
+----
+physical_plan	<REGEX>:.*Sequences: from 7 to 7.*
+
+query II
+EXPLAIN SELECT * FROM nats_scan('s', start_seq := 2, end_time := TIMESTAMP '2026-01-03')
+WHERE ts_nats >= TIMESTAMP '2026-01-01' AND ts_nats < '2026-01-02';
+----
+physical_plan	<REGEX>:.*Sequences: from 2.*Times:.*from 2026-01-01 00:00:00 to 2026-01-01 23:59:59.999999.*
+
+query II
+EXPLAIN SELECT * FROM nats_scan('s') WHERE subject = 'orders.eu.failed';
+----
+physical_plan	<REGEX>:.*Subject: orders.eu.failed.*
+
+# a prefix ending at a token boundary becomes a wildcard filter
+query II
+EXPLAIN SELECT * FROM nats_scan('s') WHERE subject LIKE 'orders.eu.%';
+----
+physical_plan	<REGEX>:.*Subject: orders.eu.>.*
+
+query II
+EXPLAIN SELECT * FROM nats_scan('s') WHERE subject LIKE 'orders.e%';
+----
+physical_plan	<!REGEX>:.*Subject.*
+
+# the subject option is not replaced by a WHERE clause
+query II
+EXPLAIN SELECT * FROM nats_scan('s', subject := 'orders.>') WHERE subject = 'orders.eu.failed';
+----
+physical_plan	<REGEX>:.*Subject: orders.>.*
+
+# filters that are not plain comparisons with a constant leave the range alone
+query II
+EXPLAIN SELECT * FROM nats_scan('s') WHERE seq > 3 OR seq < 2 OR subject = 'a.b';
+----
+physical_plan	<!REGEX>:.*(Sequences|Subject).*
 
 statement ok
 SET enable_external_access = false;

@@ -17,7 +17,7 @@ pdu-1	1767225600000	z1	4.25	true	["critical","row-a"]	{"zone":"z1","rack":"r7","
 pdu-2	0	NULL	0.5	false	[]	NULL
 
 query IIIIIIIIIIIIIIII
-SELECT * EXCLUDE (stream, subject, seq, ts_nats, payload)
+SELECT * EXCLUDE (stream, subject, seq, ts_nats, headers, payload)
 FROM nats_scan('proto', url := '{NATS_JS_TEST_URL}', subject := 'proto.types',
     proto_file := 'test/proto/types_test.proto', proto_message := 'TypesTest',
     proto_extract := ['str_field', 'bytes_field', 'int32_field', 'int64_field', 'uint32_field', 'uint64_field',

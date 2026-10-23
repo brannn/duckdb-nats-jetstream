@@ -1,0 +1,35 @@
+# name: test/sql/integration/headers.test
+# description: The headers column, read in batches (hdrs) and through the JetStream API (hdrs_api)
+# group: [nats_js]
+
+require nats_js
+
+require-env NATS_JS_TEST_URL
+
+# the headers the server adds to a read (Nats-Stream, Nats-Sequence, ...) are left out; a repeated key keeps its values
+query III
+SELECT seq, subject, headers FROM nats_scan('hdrs', url := '{NATS_JS_TEST_URL}');
+----
+1	hdrs.a	{Nats-Msg-Id=[m1], X-Trace=[t1, t2]}
+2	hdrs.a	{}
+3	hdrs.b	{Content-Type=[application/json]}
+
+query III
+SELECT seq, subject, headers FROM nats_scan('hdrs_api', url := '{NATS_JS_TEST_URL}');
+----
+1	hdrs_api.a	{Nats-Msg-Id=[m1], X-Trace=[t1, t2]}
+2	hdrs_api.a	{}
+3	hdrs_api.b	{Content-Type=[application/json]}
+
+query IIII
+SELECT seq, headers['X-Trace'], headers['X-Trace'][1], headers['Nats-Sequence']
+FROM nats_scan('hdrs', url := '{NATS_JS_TEST_URL}', end_seq := 2);
+----
+1	[t1, t2]	t1	NULL
+2	NULL	NULL	NULL
+
+query I
+SELECT list(seq) FROM nats_scan('hdrs', url := '{NATS_JS_TEST_URL}', json_extract := ['n'])
+WHERE headers['Content-Type'][1] = 'application/json';
+----
+[3]
