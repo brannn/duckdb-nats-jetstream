@@ -1,0 +1,51 @@
+# name: test/sql/integration/auth.test
+# description: Secrets against a server that wants TLS with a client certificate and a user (test/fixtures/auth)
+# group: [nats_js]
+
+require nats_js
+
+require-env NATS_JS_TEST_AUTH_URL
+
+statement error
+SELECT count(*) FROM nats_scan('events', url := '{NATS_JS_TEST_AUTH_URL}');
+----
+Failed to connect to NATS
+
+statement ok
+CREATE SECRET tls_only (TYPE nats, TLS_CA 'test/fixtures/auth/ca.pem', TLS_CERT 'test/fixtures/auth/client.pem',
+    TLS_KEY 'test/fixtures/auth/client.key', SCOPE 'tls://nowhere');
+
+# TLS alone is not enough: the server also wants a user
+statement error
+SELECT count(*) FROM nats_scan('events', url := '{NATS_JS_TEST_AUTH_URL}', secret := 'tls_only');
+----
+Authorization Violation
+
+statement ok
+CREATE SECRET wrong_password (TYPE nats, USER 'alice', PASSWORD 'nope', TLS_CA 'test/fixtures/auth/ca.pem',
+    TLS_CERT 'test/fixtures/auth/client.pem', TLS_KEY 'test/fixtures/auth/client.key', SCOPE 'tls://nowhere');
+
+statement error
+SELECT count(*) FROM nats_scan('events', url := '{NATS_JS_TEST_AUTH_URL}', secret := 'wrong_password');
+----
+Authorization Violation
+
+# the secret whose scope matches the URL
+statement ok
+CREATE SECRET alice (TYPE nats, USER 'alice', PASSWORD 's3cret', TLS_CA 'test/fixtures/auth/ca.pem',
+    TLS_CERT 'test/fixtures/auth/client.pem', TLS_KEY 'test/fixtures/auth/client.key', SCOPE '{NATS_JS_TEST_AUTH_URL}');
+
+query II
+SELECT count(*), max(seq) FROM nats_scan('events', url := '{NATS_JS_TEST_AUTH_URL}');
+----
+8	8
+
+# an NKey user, by the secret's name
+statement ok
+CREATE SECRET nkey_user (TYPE nats, NKEY 'test/fixtures/auth/user.nk', TLS_CA 'test/fixtures/auth/ca.pem',
+    TLS_CERT 'test/fixtures/auth/client.pem', TLS_KEY 'test/fixtures/auth/client.key', SCOPE 'tls://nowhere');
+
+query I
+SELECT list(seq) FROM nats_scan('gaps', url := '{NATS_JS_TEST_AUTH_URL}', secret := 'nkey_user');
+----
+[1, 2, 3, 7, 8, 9, 10]

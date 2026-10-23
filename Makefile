@@ -13,20 +13,22 @@ ifneq ($(NATS_JS_FAIL_SKIPPED_TESTS),)
 TEST_RUNNER += --test-command '{binary} {flags} --require nats_js --use-colour yes -f {test_list}'
 endif
 
-# Integration tests: serve a copy of the test/fixtures/jetstream store and run test/sql/integration against it.
-# Needs nats-server on the PATH (or NATS_SERVER=/path/to/nats-server) and a release build.
+# Integration tests: test/fixtures/serve.sh runs test/sql/integration against nats-server serving copies of the
+# test/fixtures/jetstream store. Locally it needs nats-server on the PATH (or NATS_SERVER=/path/to/nats-server) and a
+# release build. CI sets NATS_SERVER_VERSIONS, so that on Linux x86-64 the whole test run has servers of each of those
+# versions, which serve.sh downloads.
 NATS_SERVER ?= nats-server
-NATS_JS_TEST_PORT ?= 42222
-NATS_JS_TEST_STORE := build/nats-test-store
+export NATS_SERVER
 
 .PHONY: test_integration
 test_integration:
-	@rm -rf $(NATS_JS_TEST_STORE) && mkdir -p $(NATS_JS_TEST_STORE) && cp -R test/fixtures/jetstream $(NATS_JS_TEST_STORE)/
-	@$(NATS_SERVER) -js -a 127.0.0.1 -p $(NATS_JS_TEST_PORT) -sd $(NATS_JS_TEST_STORE) > $(NATS_JS_TEST_STORE)/server.log 2>&1 & \
-	server=$$!; \
-	for i in $$(seq 50); do grep -q "Server is ready" $(NATS_JS_TEST_STORE)/server.log && break; sleep 0.1; done; \
-	NATS_JS_TEST_URL=nats://127.0.0.1:$(NATS_JS_TEST_PORT) ./build/release/$(TEST_PATH) --require nats_js "$(PROJ_DIR)test/sql/integration/*"; \
-	status=$$?; kill $$server; exit $$status
+	@test/fixtures/serve.sh ./build/release/$(TEST_PATH) --require nats_js "$(PROJ_DIR)test/sql/integration/*"
+
+ifneq ($(NATS_SERVER_VERSIONS),)
+ifeq ($(shell uname -s)-$(shell uname -m),Linux-x86_64)
+TEST_RUNNER := $(PROJ_DIR)test/fixtures/serve.sh $(TEST_RUNNER)
+endif
+endif
 
 # Custom targets for NATS JetStream testing
 .PHONY: start stop setup-streams generate-data
