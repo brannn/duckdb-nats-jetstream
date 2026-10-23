@@ -64,6 +64,19 @@ SELECT seq, decode(payload) AS text
 FROM nats_scan('telemetry', end_seq := 10);
 ```
 
+### Headers
+
+`headers` is a map from each header name to a list of its values:
+
+```sql
+SELECT seq, headers['Nats-Msg-Id'][1] AS msg_id
+FROM nats_scan('telemetry', end_seq := 10);
+
+SELECT count(*)
+FROM nats_scan('telemetry')
+WHERE headers['Content-Type'][1] = 'application/json';
+```
+
 ## Filtering by Subject
 
 The `subject` option is a NATS subject filter, applied by the server, so messages on other subjects are not read.
@@ -88,6 +101,14 @@ SELECT count(*) FROM nats_scan('telemetry', subject := 'telemetry.*.power.pm5560
 ```
 
 A filter without wildcards matches only that exact subject: `'telemetry.dc1.power'` matches nothing in the demo stream.
+
+### In WHERE
+
+`WHERE subject = '...'` and prefixes that end with a dot, such as `LIKE 'telemetry.dc1.%'`, narrow the read like the option does:
+
+```sql
+SELECT count(*) FROM nats_scan('telemetry') WHERE subject LIKE 'telemetry.dc1.%';
+```
 
 ### Substring Matches
 
@@ -250,6 +271,14 @@ FROM nats_scan('telemetry',
 ORDER BY seq;
 ```
 
+### Sequence and Time Together
+
+```sql
+-- from sequence 1,000,000 up to a time
+SELECT count(*)
+FROM nats_scan('telemetry', start_seq := 1000000, end_time := TIMESTAMP '2026-10-21 12:00:00');
+```
+
 ### Another Server
 
 ```sql
@@ -259,6 +288,26 @@ FROM nats_scan('telemetry',
     json_extract := ['device_id', 'kw']
 )
 LIMIT 100;
+```
+
+### A Server That Wants Credentials
+
+The secret applies to every URL its scope starts with. See the [Guide](GUIDE.md#authentication-and-tls) for tokens, NKeys, credentials files and client certificates:
+
+```sql
+CREATE SECRET prod (
+    TYPE nats,
+    USER 'reporting',
+    PASSWORD '...',
+    TLS_CA '/etc/nats/ca.pem',
+    SCOPE 'tls://nats.example.com'
+);
+
+SELECT count(*) FROM nats_scan('telemetry', url := 'tls://nats.example.com:4222');
+
+-- or name the secret
+CREATE SECRET reporting (TYPE nats, CREDS '/etc/nats/reporting.creds');
+SELECT count(*) FROM nats_scan('telemetry', url := 'tls://nats.example.com:4222', secret := 'reporting');
 ```
 
 ### Export to Parquet
@@ -322,24 +371,42 @@ SELECT * FROM nats_scan('telemetri');
 
 ## Performance
 
-Each message is one request to the server, so the number of messages read sets the cost. The scan options narrow what is read; a `WHERE` clause on `seq`, `ts_nats` or `subject` filters after reading.
+The number of messages read sets the cost. Reads are fastest on nats-server 2.11 or later from streams with `allow_direct`, which return messages in batches (see the [Guide](GUIDE.md#how-reads-work)).
 
-### Narrow with Options
+### Narrow the Read
+
+The options and `WHERE` clauses on `seq`, `ts_nats` and `subject` narrow what is read. Other conditions filter after reading:
 
 ```sql
--- reads only the matching messages
+-- read only the matching messages
 SELECT count(*) FROM nats_scan('telemetry', subject := 'telemetry.dc1.power.>');
-
--- reads the whole stream, then filters
 SELECT count(*) FROM nats_scan('telemetry') WHERE subject LIKE 'telemetry.dc1.power.%';
+SELECT count(*) FROM nats_scan('telemetry') WHERE seq BETWEEN 1000000 AND 1100000;
+
+-- read the whole stream, then filter
+SELECT count(*) FROM nats_scan('telemetry') WHERE subject LIKE '%power%';
+SELECT count(*) FROM nats_scan('telemetry') WHERE seq > 1000000 OR subject = 'telemetry.dc2.power.pm5560.pm5560-003';
 ```
 
-### Sequence Ranges on Large Streams
+`EXPLAIN` shows what the scan reads:
 
 ```sql
-SELECT count(*)
-FROM nats_scan('telemetry', start_seq := 1000000, end_seq := 1100000);
+EXPLAIN SELECT count(*) FROM nats_scan('telemetry') WHERE seq > 1000000 AND subject LIKE 'telemetry.dc1.%';
 ```
+
+```
+╭─ Nats Scan ───────────────┴───────────────────────────╮
+│ Stream: telemetry                                     │
+│ Subject: telemetry.dc1.>                              │
+│ Sequences: from 1000001                               │
+│ Projections: seq, subject                             │
+│ ~1 row                                                │
+╰───────────────────────────────────────────────────────╯
+```
+
+### Only the Columns You Need
+
+Payloads are decoded only for the field columns a query uses, so naming columns is cheaper than `SELECT *` with `json_extract` or `proto_extract`.
 
 ### LIMIT
 

@@ -11,7 +11,7 @@ LOAD nats_js;
 
 The NATS client (cnats) and Protocol Buffers are linked into the extension, so nothing else needs installing.
 
-`nats_scan` needs a NATS server with JetStream enabled. It connects to `nats://localhost:4222` unless a query sets `url`. Development and tests use nats-server 2.15; reading by subject relies on `next_by_subj`, which needs nats-server 2.9 or later.
+`nats_scan` needs a NATS server with JetStream enabled. It connects to `nats://localhost:4222` unless a query sets `url`. Reading by subject relies on `next_by_subj`, which needs nats-server 2.9 or later. Reads are much faster from nats-server 2.11 or later, which returns messages in batches; see [How Reads Work](#how-reads-work). The tests run against nats-server 2.10 and 2.15.
 
 ## Reading a Stream
 
@@ -31,7 +31,7 @@ FROM nats_scan('telemetry', end_seq := 3);
 └───────────┴───────────────────────────────────────┴────────┴────────────────────────────┴───────┘
 ```
 
-The five base columns are:
+The six base columns are:
 
 | Column | Type | Contents |
 |--------|------|----------|
@@ -39,9 +39,10 @@ The five base columns are:
 | `subject` | VARCHAR | Message subject |
 | `seq` | UBIGINT | Stream sequence number |
 | `ts_nats` | TIMESTAMP | Time the server stored the message, in UTC |
+| `headers` | MAP(VARCHAR, VARCHAR[]) | Message headers |
 | `payload` | BLOB, or VARCHAR with `json_extract` | Message data |
 
-Extracted fields follow as extra columns. Message headers are not returned yet.
+Extracted fields follow as extra columns. Only the columns a query uses are read out of the messages, so a payload is decoded only when one of its fields is selected.
 
 ### Sequence Ranges
 
@@ -62,7 +63,9 @@ FROM nats_scan('telemetry',
 );
 ```
 
-Both ends are inclusive and compared with `ts_nats` at microsecond precision, in UTC. The start is found by binary search, which takes about 20 requests on a stream of a million messages; the scan stops at the first message after `end_time`. A time range cannot be combined with `start_seq` or `end_seq`.
+Both ends are inclusive and compared with `ts_nats` at microsecond precision, in UTC. On nats-server 2.11 or later, a stream with `allow_direct` finds the start in one request. Otherwise the start is found by binary search, which takes about 20 requests on a stream of a million messages. The scan stops at the first message after `end_time`.
+
+Sequence and time options combine: `start_seq := 1000, end_time := ...` reads from sequence 1000 up to that time.
 
 To compare with the current time, convert it to UTC: `start_time := now() AT TIME ZONE 'UTC' - INTERVAL 1 HOUR`.
 
@@ -73,7 +76,47 @@ SELECT seq, subject
 FROM nats_scan('telemetry', subject := 'telemetry.dc1.power.>');
 ```
 
-`subject` is a NATS subject filter: `*` matches one token and `>` matches the remaining tokens. The server applies it, so messages on other subjects are never read. A filter without wildcards matches one subject exactly. For substring matches, filter in SQL with `WHERE subject LIKE ...`, which reads the whole range.
+`subject` is a NATS subject filter: `*` matches one token and `>` matches the remaining tokens. The server applies it, so messages on other subjects are never read. A filter without wildcards matches one subject exactly.
+
+### WHERE Clauses
+
+`WHERE` clauses on `seq`, `ts_nats` and `subject` narrow the read like the options do, so these two queries read the same messages:
+
+```sql
+SELECT seq, subject FROM nats_scan('telemetry', start_seq := 1000, end_seq := 2000);
+SELECT seq, subject FROM nats_scan('telemetry') WHERE seq BETWEEN 1000 AND 2000;
+```
+
+The scan narrows its read for these conditions:
+
+- comparisons (`=`, `<`, `<=`, `>`, `>=`) and `BETWEEN` of `seq` or `ts_nats` with a constant;
+- `subject = '...'`;
+- `subject LIKE 'a.b.%'` and `starts_with(subject, 'a.b.')`, when the prefix ends with a dot; these become the subject filter `a.b.>`.
+
+Conditions joined with `AND` narrow the read together, and they also combine with the options. A `WHERE` clause on `subject` does not replace a `subject` option.
+
+DuckDB applies every other condition after reading, such as `OR`, `LIKE '%power%'` or a prefix that ends mid-token. `EXPLAIN` shows the subject, sequences and times the scan reads.
+
+## Headers
+
+`headers` maps each header name to its values, since NATS allows a name to repeat:
+
+```sql
+SELECT seq, headers, headers['Nats-Msg-Id'][1] AS msg_id
+FROM nats_scan('orders', end_seq := 2);
+```
+
+```
+┌────────┬──────────────────────────────────────────┬─────────┐
+│  seq   │                 headers                  │ msg_id  │
+│ uint64 │         map(varchar, varchar[])          │ varchar │
+├────────┼──────────────────────────────────────────┼─────────┤
+│      1 │ {Nats-Msg-Id=[o-1001], X-Trace=[t1, t2]} │ o-1001  │
+│      2 │ {}                                       │ NULL    │
+└────────┴──────────────────────────────────────────┴─────────┘
+```
+
+A message without headers has an empty map. The headers the server adds to its replies, such as `Nats-Stream` and `Nats-Sequence`, are left out; the base columns hold the same information. A header value that is not valid UTF-8 reads as NULL, and a header name that is not valid UTF-8 is skipped.
 
 ## JSON Payloads
 
@@ -185,13 +228,55 @@ Fields with presence (messages, proto3 `optional` fields and `oneof` members) ar
 
 ## How Reads Work
 
-`nats_scan` creates no consumers. It connects when the query starts, reads the stream info, and then requests one message at a time: the first message at or after a sequence whose subject matches the filter (`>` without one). Deleted sequences are skipped on the server, and the next request starts after the returned message.
+`nats_scan` creates no consumers. It connects when the query starts and reads the stream info. Then it asks for the messages at or after a sequence whose subject matches the filter (`>` without one). Deleted sequences are skipped on the server, and each request starts after the last message returned.
 
-Streams with `allow_direct` are read with direct gets, which any replica can answer. Other streams are read through the JetStream API (`$JS.API.STREAM.MSG.GET`), which the stream leader answers.
+How many messages a request returns depends on the server and the stream:
 
-The scan stops at the stream's last sequence as recorded at the start, so it finishes on a stream that is still receiving messages. Each request waits up to 5 seconds. The scan runs on one thread and returns rows in chunks of 2,048, and a query can be cancelled between messages.
+| Stream | nats-server 2.11 or later | Older servers |
+|--------|---------------------------|---------------|
+| `allow_direct` | Direct get batches of up to 2,048 messages or 8 MB | Direct gets, one message per request |
+| no `allow_direct` | JetStream API (`$JS.API.STREAM.MSG.GET`), one message per request | The same |
 
-Reading one message per request makes the server's round trip the main cost: roughly 30,000 messages a second on loopback, and about 1,000 a second over a 1 ms network round trip. Narrow scans with `subject`, sequence or time options rather than `WHERE`, which filters after reading.
+Any replica can answer a direct get. Only the stream leader answers the JetStream API.
+
+The server's round trip is the main cost. On loopback, batches read about 700,000 small messages a second, and single messages about 30,000. Over a 1 ms network round trip, single messages drop to about 1,000 a second. For large reads, give the stream `allow_direct` and use nats-server 2.11 or later.
+
+The scan stops at the stream's last sequence as recorded at the start, so it finishes on a stream that is still receiving messages. Each request waits up to 5 seconds. The scan runs on one thread and returns rows in chunks of 2,048. DuckDB's progress bar follows the scan through its range of sequences, and a query can be cancelled between messages.
+
+## Authentication and TLS
+
+Credentials and TLS files are kept in DuckDB secrets of type `nats`:
+
+```sql
+CREATE SECRET prod (
+    TYPE nats,
+    USER 'reporting',
+    PASSWORD '...',
+    SCOPE 'tls://nats.example.com'
+);
+
+SELECT count(*) FROM nats_scan('telemetry', url := 'tls://nats.example.com:4222');
+```
+
+A query uses the secret named by its `secret` option. Without that option, it uses the secret whose `SCOPE` is the longest prefix of `url`. A URL without a scheme counts as `nats://`, and a secret without a `SCOPE` applies to every URL. A query that finds no secret connects without credentials.
+
+A secret holds at most one way to sign in:
+
+| Options | Sign-in |
+|---------|---------|
+| `USER`, `PASSWORD` | User and password |
+| `TOKEN` | Token |
+| `CREDS` | Path to a credentials file, holding a user JWT and NKey seed, as for decentralized auth |
+| `NKEY` | Path to a file holding a user NKey seed |
+
+For TLS, use a `tls://` URL, or give one of these options:
+
+| Option | Contents |
+|--------|----------|
+| `TLS_CA` | Path to the certificates that sign the server's certificate, when they are not in the system's store |
+| `TLS_CERT`, `TLS_KEY` | Paths to a client certificate and its key, for servers that verify clients |
+
+`duckdb_secrets()` redacts passwords and tokens. The files are read when a query starts. Add `PERSISTENT` to `CREATE SECRET` to keep the secret across sessions; DuckDB stores persistent secrets unencrypted in `~/.duckdb/stored_secrets`.
 
 ## Security
 
@@ -200,7 +285,7 @@ With `SET enable_external_access = false`, `nats_scan` refuses to run, since it 
 ## API Reference
 
 ```
-nats_scan(stream, [subject, url, start_seq, end_seq, start_time, end_time,
+nats_scan(stream, [subject, url, secret, start_seq, end_seq, start_time, end_time,
                    json_extract, proto_file, proto_message, proto_extract])
 ```
 
@@ -208,6 +293,7 @@ nats_scan(stream, [subject, url, start_seq, end_seq, start_time, end_time,
 |-----------|------|---------|-------------|
 | `stream` | VARCHAR | required | Stream name (positional) |
 | `url` | VARCHAR | `nats://localhost:4222` | NATS server URL |
+| `secret` | VARCHAR | the secret that matches `url` | Name of a `nats` secret |
 | `subject` | VARCHAR | all subjects | NATS subject filter, with `*` and `>` wildcards |
 | `start_seq` | UBIGINT | first message | First sequence, inclusive |
 | `end_seq` | UBIGINT | last message | Last sequence, inclusive |
@@ -220,23 +306,13 @@ nats_scan(stream, [subject, url, start_seq, end_seq, start_time, end_time,
 
 Rules:
 
-- Sequence options (`start_seq`, `end_seq`) cannot be combined with time options (`start_time`, `end_time`).
 - `json_extract` and `proto_extract` cannot be combined.
 - `proto_extract` requires `proto_file` and `proto_message`.
 - Options cannot be NULL, and field lists cannot contain NULL or empty names.
 
 ## Roadmap
 
-Planned for 0.4.0:
-
-- Reads through an ephemeral ordered consumer, which streams messages in batches, with direct gets as the fallback
-- Filter pushdown, so `WHERE seq`, `WHERE ts_nats` and `WHERE subject = ...` narrow the read like the options do, and projection pushdown, which skips payload decoding when it is not needed
-- A headers column
-- Authentication and TLS through DuckDB secrets: credentials files, NKeys, tokens, user and password
-- Progress and row estimates from the stream's counters
-- Tests against a real server in CI
-
-Later ideas: listing streams and their info, reading KV buckets, native LIST and STRUCT columns for protobuf, well-known types such as `Timestamp` as DuckDB types, imports from other directories, and loading schemas from S3 or HTTP.
+Ideas for later releases: listing streams and their info, reading KV buckets, native LIST and STRUCT columns for protobuf, well-known types such as `Timestamp` as DuckDB types, imports from other directories, and loading schemas from S3 or HTTP.
 
 ## Development
 
@@ -266,7 +342,9 @@ make test               # tests that need no server
 make test_integration   # tests against a real nats-server
 ```
 
-`make test_integration` copies the JetStream store in `test/fixtures/jetstream` to `build/`, serves it with `nats-server` on port 42222 and runs `test/sql/integration`. It needs `nats-server` on the `PATH`, or `NATS_SERVER=/path/to/nats-server`. The store holds synthetic messages with fixed sequences and timestamps; `test/fixtures/make-jetstream-store.sh` regenerates it, using nats-server, the nats CLI and protoc.
+`make test_integration` runs `test/sql/integration` through `test/fixtures/serve.sh`. That script serves two copies of the JetStream store in `test/fixtures/jetstream` with `nats-server`: one without auth on port 42222, and one on port 42223 that wants TLS and a user (`test/fixtures/auth`). It needs `nats-server` on the `PATH`, or `NATS_SERVER=/path/to/nats-server`. The store holds synthetic messages with fixed sequences and timestamps; `test/fixtures/make-jetstream-store.sh` regenerates it, using nats-server, the nats CLI and protoc.
+
+On Linux x86-64, CI runs every test against nats-server 2.10 and 2.15, which `serve.sh` downloads and checks against pinned SHA-256 sums.
 
 ### Demo Data
 

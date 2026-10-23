@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [0.4.0] - 2026-10-23
+
+### Upgrading from 0.3
+- A `headers` column, `MAP(VARCHAR, VARCHAR[])`, comes before `payload`, so `SELECT *` returns one more column.
+- Sequence and time options can be combined; they no longer raise an error.
+
+### Added
+- Batched reads: on nats-server 2.11 or later, a stream with `allow_direct` returns up to 2,048 messages per request, and a start time takes one request. On loopback, a scan reads about 700,000 small messages a second, against 30,000 before.
+- The `headers` column
+- `WHERE` clauses on `seq`, `ts_nats` and `subject` narrow the read like the options do, and `EXPLAIN` shows what the scan reads
+- Payloads are decoded only for the field columns a query uses
+- Secrets of type `nats` for user and password, token, credentials file or NKey, and TLS files, found by scope or named with the `secret` option
+- DuckDB's progress bar for long scans
+- CI runs the integration tests against nats-server 2.10 and 2.15
+
+### Fixed
+- `proto_message` accepts package-qualified names, nested types such as `Outer.Inner`, and types from imported files
+
 ## [0.3.0] - 2026-10-21
 
 ### Upgrading from 0.2

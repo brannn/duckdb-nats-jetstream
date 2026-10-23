@@ -1,7 +1,7 @@
 # DuckDB NATS JetStream Extension
 
 [![CI](https://github.com/brannn/duckdb-nats-jetstream/actions/workflows/MainDistributionPipeline.yml/badge.svg)](https://github.com/brannn/duckdb-nats-jetstream/actions/workflows/MainDistributionPipeline.yml)
-[![Version](https://img.shields.io/badge/Version-v0.3.0-orange)](https://github.com/brannn/duckdb-nats-jetstream/releases/tag/v0.3.0)
+[![Version](https://img.shields.io/badge/Version-v0.4.0-orange)](https://github.com/brannn/duckdb-nats-jetstream/releases/tag/v0.4.0)
 [![DuckDB Version](https://img.shields.io/badge/DuckDB-v2.0.0-blue)](https://github.com/duckdb/duckdb/releases/tag/v2.0.0)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)](https://github.com/brannn/duckdb-nats-jetstream/actions)
@@ -34,9 +34,12 @@ Times are UTC, both in `ts_nats` and in the `start_time` and `end_time` options.
 ## Features
 
 - Subject filters with NATS wildcards (`*` and `>`), applied by the server
-- Sequence and time ranges; time ranges are found by binary search
+- Sequence and time ranges, from the options or from `WHERE` clauses on `seq`, `ts_nats` and `subject`
+- Batched reads on nats-server 2.11 and later
+- Message headers as a map
 - JSON field extraction, including nested paths such as `location.zone`
 - Protocol Buffers decoding from a `.proto` file at query time, with native DuckDB types; repeated and map fields come back as JSON
+- Authentication and TLS through DuckDB secrets: user and password, token, NKey, credentials file, client certificates
 - Reads any stream, with or without `allow_direct`, and creates no consumers
 - Linux, macOS and Windows
 
