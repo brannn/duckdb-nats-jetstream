@@ -54,14 +54,17 @@ deps/
 # Test artifacts
 test_results/
 *.log
-test/TEST_COVERAGE_SUMMARY.md
+duckdb_unittest_tempdir/
 
 # Docker
 .docker/
 
-# Documentation (internal notes, not for distribution)
+# Local notes and tool settings, never committed
 DOCUMENTATION.md
 planning/
+test/TEST_COVERAGE_SUMMARY.md
+.claude/
+CLAUDE.md
 
 # Demo files (generated for screenshots)
 demo.html

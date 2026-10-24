@@ -310,10 +310,6 @@ Rules:
 - `proto_extract` requires `proto_file` and `proto_message`.
 - Options cannot be NULL, and field lists cannot contain NULL or empty names.
 
-## Roadmap
-
-Ideas for later releases: listing streams and their info, reading KV buckets, native LIST and STRUCT columns for protobuf, well-known types such as `Timestamp` as DuckDB types, imports from other directories, and loading schemas from S3 or HTTP.
-
 ## Development
 
 ### Building
