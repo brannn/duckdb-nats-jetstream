@@ -41,16 +41,18 @@ download() {
     local dir=build/nats-server-v$version
     if [ ! -x "$dir/nats-server" ]; then
         local expected tarball=build/nats-server-v$version.tar.gz
-        expected=$(sha256_of "$version")
-        mkdir -p "$dir"
+        # set -e does not apply inside $(download ...)
+        expected=$(sha256_of "$version") || return 1
+        mkdir -p "$dir" || return 1
         curl -fsSL -o "$tarball" \
-            "https://github.com/nats-io/nats-server/releases/download/v$version/nats-server-v$version-$PLATFORM.tar.gz"
+            "https://github.com/nats-io/nats-server/releases/download/v$version/nats-server-v$version-$PLATFORM.tar.gz" ||
+            return 1
         if [ "$(sha256 "$tarball")" != "$expected" ]; then
             echo "serve.sh: $tarball does not match its SHA256" >&2
             rm -f "$tarball"
             return 1
         fi
-        tar xzf "$tarball" -C "$dir" --strip-components 1
+        tar xzf "$tarball" -C "$dir" --strip-components 1 || return 1
     fi
     echo "$dir/nats-server"
 }
@@ -71,10 +73,12 @@ serve() {
     shift 3
     rm -rf "${WORK:?}/$name" && mkdir -p "$WORK/$name" && cp -R test/fixtures/jetstream "$WORK/$name/"
     "$server" -js -a 127.0.0.1 -p "$port" -sd "$WORK/$name" "$@" > "$WORK/$name.log" 2>&1 &
-    local pid=$!
+    local pid=$! tries=0
     PIDS="$PIDS $pid"
     until grep -q "Server is ready" "$WORK/$name.log"; do
-        if ! kill -0 "$pid" 2> /dev/null; then
+        tries=$((tries + 1))
+        if ! kill -0 "$pid" 2> /dev/null || [ "$tries" -gt 300 ]; then
+            echo "serve.sh: nats-server ($name) did not start" >&2
             cat "$WORK/$name.log" >&2
             exit 1
         fi
@@ -94,7 +98,7 @@ run() {
 
 if [ -n "${NATS_SERVER_VERSIONS:-}" ]; then
     for version in $NATS_SERVER_VERSIONS; do
-        server=$(download "$version")
+        server=$(download "$version") || exit 1
         run "$server" "$@"
     done
 else
