@@ -292,7 +292,7 @@ LIMIT 100;
 
 ### A Server That Wants Credentials
 
-The secret applies to every URL its scope starts with. See the [Guide](GUIDE.md#authentication-and-tls) for tokens, NKeys, credentials files and client certificates:
+The secret applies to URLs that start with its scope. See the [Guide](GUIDE.md#authentication-and-tls) for tokens, NKeys, credentials files and client certificates:
 
 ```sql
 CREATE SECRET prod (
@@ -300,13 +300,13 @@ CREATE SECRET prod (
     USER 'reporting',
     PASSWORD '...',
     TLS_CA '/etc/nats/ca.pem',
-    SCOPE 'tls://nats.example.com'
+    SCOPE 'tls://nats.example.com:4222'
 );
 
 SELECT count(*) FROM nats_scan('telemetry', url := 'tls://nats.example.com:4222');
 
--- or name the secret
-CREATE SECRET reporting (TYPE nats, CREDS '/etc/nats/reporting.creds');
+-- or name the secret. Give it a scope as well, since a secret without one applies to every URL.
+CREATE SECRET reporting (TYPE nats, CREDS '/etc/nats/reporting.creds', SCOPE 'tls://reports.example.com:4222');
 SELECT count(*) FROM nats_scan('telemetry', url := 'tls://nats.example.com:4222', secret := 'reporting');
 ```
 

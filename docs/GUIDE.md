@@ -252,19 +252,19 @@ CREATE SECRET prod (
     TYPE nats,
     USER 'reporting',
     PASSWORD '...',
-    SCOPE 'tls://nats.example.com'
+    SCOPE 'tls://nats.example.com:4222'
 );
 
 SELECT count(*) FROM nats_scan('telemetry', url := 'tls://nats.example.com:4222');
 ```
 
-A query uses the secret named by its `secret` option. Without that option, it uses the secret whose `SCOPE` is the longest prefix of `url`. A URL without a scheme counts as `nats://`, and a secret without a `SCOPE` applies to every URL. A query that finds no secret connects without credentials.
+A query uses the secret named by its `secret` option. Without that option, it uses the secret with the longest `SCOPE` that `url` starts with, where the scope ends at the end of a scheme, host or port: `tls://nats.example.com:4222` is for `tls://nats.example.com:4222`, and not for `tls://nats.example.com:42220`. A URL without a scheme counts as `nats://`. A secret without a `SCOPE` applies to every URL that no other secret's scope matches. A query that finds no secret connects without credentials. DuckDB's `which_secret()` matches any start of a URL, so it can name a different secret than the one `nats_scan` uses.
 
 A secret holds at most one way to sign in:
 
 | Options | Sign-in |
 |---------|---------|
-| `USER`, `PASSWORD` | User and password |
+| `USER`, `PASSWORD` | User and password, both given |
 | `TOKEN` | Token |
 | `CREDS` | Path to a credentials file, holding a user JWT and NKey seed, as for decentralized auth |
 | `NKEY` | Path to a file holding a user NKey seed |
@@ -274,13 +274,13 @@ For TLS, use a `tls://` URL, or give one of these options:
 | Option | Contents |
 |--------|----------|
 | `TLS_CA` | Path to the certificates that sign the server's certificate, when they are not in the system's store |
-| `TLS_CERT`, `TLS_KEY` | Paths to a client certificate and its key, for servers that verify clients |
+| `TLS_CERT`, `TLS_KEY` | Paths to a client certificate and its key, for servers that verify clients. The key cannot be encrypted. |
 
-`duckdb_secrets()` redacts passwords and tokens. The files are read when a query starts. Add `PERSISTENT` to `CREATE SECRET` to keep the secret across sessions; DuckDB stores persistent secrets unencrypted in `~/.duckdb/stored_secrets`.
+`duckdb_secrets()` redacts passwords and tokens. The files are read through DuckDB's file system when a query starts, so `~` is the home directory and `disabled_filesystems` applies. Add `PERSISTENT` to `CREATE SECRET` to keep the secret across sessions; DuckDB stores persistent secrets unencrypted in `~/.duckdb/stored_secrets`.
 
 ## Security
 
-With `SET enable_external_access = false`, `nats_scan` refuses to run, since it opens network connections and reads `.proto` files.
+With `SET enable_external_access = false`, `nats_scan` refuses to run, since it opens network connections and reads `.proto` files. That includes statements prepared before the setting changed.
 
 ## API Reference
 

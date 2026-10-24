@@ -1,0 +1,16 @@
+# name: test/sql/nats_scan_disabled_filesystems.test
+# description: A secret's files are read through DuckDB's file system, so disabled_filesystems applies to them
+# group: [nats_js]
+
+require nats_js
+
+statement ok
+CREATE SECRET nkey (TYPE nats, NKEY 'test/fixtures/auth/user.nk');
+
+statement ok
+SET disabled_filesystems = 'LocalFileSystem';
+
+statement error
+SELECT * FROM nats_scan('s', url := 'nats://127.0.0.1:1');
+----
+File system LocalFileSystem has been disabled by configuration

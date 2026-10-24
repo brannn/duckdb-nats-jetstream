@@ -5,6 +5,7 @@
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/main/settings.hpp"
 #include "duckdb/common/case_insensitive_map.hpp"
+#include "duckdb/common/error_data.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/exception/binder_exception.hpp"
 #include "duckdb/common/types/blob.hpp"
@@ -321,11 +322,15 @@ static void AddColumn(vector<Identifier> &names, case_insensitive_set_t &used, c
     names.emplace_back(column_name);
 }
 
-static unique_ptr<FunctionData> NatsScanBind(ClientContext &context, TableFunctionBindInput &input,
-                                              vector<LogicalType> &return_types, vector<Identifier> &names) {
+static void CheckExternalAccess(ClientContext &context) {
     if (!Settings::Get<EnableExternalAccessSetting>(context)) {
         throw PermissionException("nats_scan is disabled because enable_external_access is false");
     }
+}
+
+static unique_ptr<FunctionData> NatsScanBind(ClientContext &context, TableFunctionBindInput &input,
+                                              vector<LogicalType> &return_types, vector<Identifier> &names) {
+    CheckExternalAccess(context);
 
     auto bind_data = make_uniq<NatsScanBindData>();
     bind_data->stream_name = GetStringOption(input.inputs[0], "stream");
@@ -603,7 +608,19 @@ static Value HeadersValue(NatsStoredMsg &msg) {
 // through a direct get or, for streams without allow_direct, the JetStream API
 enum class NatsReadMode : uint8_t { BATCH, DIRECT_GET, MSG_GET };
 
+// Connection options, freed however the scan's init ends
+struct NatsOptions {
+    natsOptions *opts = nullptr;
+    ~NatsOptions() {
+        if (opts != nullptr) {
+            natsOptions_Destroy(opts);
+        }
+    }
+};
+
 struct NatsScanGlobalState : public GlobalTableFunctionState {
+    // An NKEY secret's key, which conn signs with
+    unique_ptr<NatsNKey> nkey;
     natsConnection *conn = nullptr;
     jsCtx *js = nullptr;
     jsStreamInfo *stream_info = nullptr;
@@ -950,6 +967,8 @@ static bool ServerReadsBatches(const jsStreamInfo &info) {
 
 static unique_ptr<GlobalTableFunctionState> NatsScanInitGlobal(ClientContext &context,
                                                                  TableFunctionInitInput &input) {
+    // Also here, for a statement prepared before the setting changed
+    CheckExternalAccess(context);
     auto &bind_data = input.bind_data->Cast<NatsScanBindData>();
     auto state = make_uniq<NatsScanGlobalState>();
 
@@ -975,28 +994,33 @@ static unique_ptr<GlobalTableFunctionState> NatsScanInitGlobal(ClientContext &co
     }
 
     // Connect to NATS and validate stream at init time (fail-fast on typos / unreachable server)
-    natsOptions *opts = nullptr;
-    natsStatus s = natsOptions_Create(&opts);
+    NatsOptions options;
+    natsStatus s = natsOptions_Create(&options.opts);
     if (s != NATS_OK) {
         throw IOException("Failed to create NATS options: %s", NatsErrorText(s));
     }
 
-    s = natsOptions_SetTimeout(opts, NATS_TIMEOUT_MS);
+    s = natsOptions_SetTimeout(options.opts, NATS_TIMEOUT_MS);
     if (s == NATS_OK) {
-        s = natsOptions_SetURL(opts, bind_data.nats_url.c_str());
+        s = natsOptions_SetURL(options.opts, bind_data.nats_url.c_str());
     }
     if (s != NATS_OK) {
-        natsOptions_Destroy(opts);
         throw IOException("Invalid NATS URL '%s': %s", bind_data.nats_url, NatsErrorText(s));
     }
-    s = NatsSecret::Apply(bind_data.connection, opts);
+    try {
+        s = NatsSecret::Apply(context, bind_data.connection, options.opts, state->nkey);
+    } catch (std::exception &ex) {
+        ErrorData error(ex);
+        if (error.Type() != ExceptionType::IO) {
+            throw;
+        }
+        throw IOException("Cannot use NATS secret '%s': %s", bind_data.connection.secret_name, error.RawMessage());
+    }
     if (s != NATS_OK) {
-        natsOptions_Destroy(opts);
         throw IOException("Cannot use NATS secret '%s': %s", bind_data.connection.secret_name, NatsErrorText(s));
     }
 
-    s = natsConnection_Connect(&state->conn, opts);
-    natsOptions_Destroy(opts);
+    s = natsConnection_Connect(&state->conn, options.opts);
     if (s != NATS_OK) {
         throw IOException("Failed to connect to NATS at '%s': %s", bind_data.nats_url, NatsErrorText(s));
     }

@@ -365,6 +365,40 @@ SELECT p.name, d.name FROM which_secret('tls://prod.example:4222', 'nats') p, wh
 ----
 prod	dev
 
+# nats_scan matches a scope only where a scheme, host or port ends (which_secret matches any start of the URL); the
+# secrets' bad NKEY files show which one a scan uses
+statement ok
+CREATE SECRET port_4273 (TYPE nats, NKEY 'test/proto/event.proto', SCOPE 'nats://127.0.0.1:4273');
+
+statement ok
+CREATE SECRET host_local (TYPE nats, NKEY 'test/proto/event.proto', SCOPE 'nats://local');
+
+statement error
+SELECT * FROM nats_scan('s', url := 'nats://127.0.0.1:4273');
+----
+Cannot use NATS secret 'port_4273'
+
+statement error
+SELECT * FROM nats_scan('s', url := 'nats://127.0.0.1:4273,nats://127.0.0.1:4274');
+----
+Cannot use NATS secret 'port_4273'
+
+statement error
+SELECT * FROM nats_scan('s', url := 'nats://127.0.0.1:42733');
+----
+Failed to connect to NATS at 'nats://127.0.0.1:42733'
+
+statement error
+SELECT * FROM nats_scan('s', url := 'nats://localhost:42733');
+----
+Failed to connect to NATS at 'nats://localhost:42733'
+
+statement ok
+DROP SECRET port_4273;
+
+statement ok
+DROP SECRET host_local;
+
 statement error
 CREATE SECRET two (TYPE nats, TOKEN 't', CREDS '/etc/nats/user.creds');
 ----
@@ -374,6 +408,21 @@ statement error
 CREATE SECRET half (TYPE nats, TLS_CERT '/etc/nats/client.pem');
 ----
 A NATS secret takes TLS_CERT and TLS_KEY together
+
+statement error
+CREATE SECRET no_password (TYPE nats, USER 'alice');
+----
+A NATS secret takes USER and PASSWORD together
+
+statement error
+CREATE SECRET no_user (TYPE nats, PASSWORD 'pw');
+----
+A NATS secret takes USER and PASSWORD together
+
+statement error
+CREATE SECRET empty_token (TYPE nats, TOKEN '');
+----
+A NATS secret's TOKEN cannot be empty
 
 statement error
 SELECT * FROM nats_scan('s', secret := 'missing');
@@ -405,8 +454,50 @@ SELECT * FROM nats_scan('s', url := 'nats://127.0.0.1:1', secret := 'bad_nkey');
 ----
 'test/proto/event.proto' does not hold a user NKey seed
 
+# a credentials file must hold a user JWT, so that a seed file given as CREDS is not sent to the server
+statement ok
+CREATE SECRET seed_as_creds (TYPE nats, CREDS 'test/fixtures/auth/user.nk');
+
+statement error
+SELECT * FROM nats_scan('s', url := 'nats://127.0.0.1:1', secret := 'seed_as_creds');
+----
+'test/fixtures/auth/user.nk' is not a NATS credentials file
+
+# OpenSSL would ask for the passphrase of an encrypted key on the terminal
+statement ok
+CREATE SECRET encrypted_key (TYPE nats, TLS_CERT 'test/fixtures/auth/client.pem', TLS_KEY 'test/fixtures/auth/encrypted.key');
+
+statement error
+SELECT * FROM nats_scan('s', url := 'nats://127.0.0.1:1', secret := 'encrypted_key');
+----
+'test/fixtures/auth/encrypted.key' is encrypted
+
+# ~ is the home directory, as in DuckDB's file functions: the seed is read, and connecting fails
+statement ok
+SET home_directory = 'test/fixtures/auth';
+
+statement ok
+CREATE SECRET home_nkey (TYPE nats, NKEY '~/user.nk');
+
+statement error
+SELECT * FROM nats_scan('s', url := 'nats://127.0.0.1:1', secret := 'home_nkey');
+----
+Failed to connect to NATS at 'nats://127.0.0.1:1'
+
+statement ok
+RESET home_directory;
+
+# a statement prepared before external access was turned off is refused when executed
+statement ok
+PREPARE scan_before AS SELECT * FROM nats_scan('s', url := 'nats://127.0.0.1:1');
+
 statement ok
 SET enable_external_access = false;
+
+statement error
+EXECUTE scan_before;
+----
+nats_scan is disabled because enable_external_access is false
 
 statement error
 SELECT * FROM nats_scan('s');
