@@ -95,6 +95,8 @@ add_streams_0_4() {
         --republish-source 'replies_src.>' --republish-destination 'replies.>' > /dev/null
     pub replies_src.a '{"n":5}'
     pub replies_src.b '{"n":6}'
+    # an empty message with Status 503, which the client library takes for "no responders" in a request's reply
+    pub replies.own '' -H 'Status:503'
 }
 add_streams_0_4
 

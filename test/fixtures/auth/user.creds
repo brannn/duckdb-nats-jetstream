@@ -1,0 +1,12 @@
+-----BEGIN NATS USER JWT-----
+eyJ0eXAiOiJKV1QiLCJhbGciOiJlZDI1NTE5LW5rZXkifQ.test-only-not-signed-by-an-operator.c2ln
+------END NATS USER JWT------
+
+************************* IMPORTANT *************************
+Test credentials for nats_js: the JWT is a placeholder and the seed is user.nk
+
+-----BEGIN USER NKEY SEED-----
+SUAIPSVO4MJ3U75LBSMZU4O5JBJVMD7JGN7EZNG3E6QTZ6YHMW3VI44ILU
+------END USER NKEY SEED------
+
+*************************************************************

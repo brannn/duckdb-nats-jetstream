@@ -21,7 +21,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 - `proto_message` accepts package-qualified names, nested types such as `Outer.Inner`, and types from imported files
-- Direct gets read a message with its own `Status` header as the end of the stream or an error, and a message republished from another stream with that stream's sequence, subject and time
+- Direct gets no longer take a message's own `Status` header for the end of the stream or an error, and read a message republished from another stream with its own sequence, subject and time
 - `enable_external_access = false` also stops statements prepared before it was set
 
 ## [0.3.0] - 2026-10-21

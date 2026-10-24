@@ -33,9 +33,13 @@
 #include <google/protobuf/timestamp.pb.h>
 #include <google/protobuf/wrappers.pb.h>
 #include <atomic>
+#include <chrono>
 #include <cmath>
+#include <condition_variable>
+#include <deque>
 #include <filesystem>
 #include <map>
+#include <mutex>
 
 // Windows defines GetMessage as a macro (GetMessageA/GetMessageW)
 // This conflicts with protobuf's Reflection::GetMessage() method
@@ -608,6 +612,46 @@ static Value HeadersValue(NatsStoredMsg &msg) {
 // through a direct get or, for streams without allow_direct, the JetStream API
 enum class NatsReadMode : uint8_t { BATCH, DIRECT_GET, MSG_GET };
 
+// Direct get replies, as an async subscription receives them. natsSubscription_NextMsg and natsConnection_Request
+// would take a stored message that is empty and has its own Status header of 503 for "no responders", and drop it.
+struct NatsReplyQueue {
+    std::mutex lock;
+    std::condition_variable ready;
+    std::deque<natsMsg *> msgs;
+
+    ~NatsReplyQueue() {
+        for (auto msg : msgs) {
+            natsMsg_Destroy(msg);
+        }
+    }
+
+    // The next reply, which the caller takes over, or null if none comes within timeout_ms
+    natsMsg *Next(int64_t timeout_ms) {
+        std::unique_lock<std::mutex> guard(lock);
+        if (!ready.wait_for(guard, std::chrono::milliseconds(timeout_ms), [&] { return !msgs.empty(); })) {
+            return nullptr;
+        }
+        auto msg = msgs.front();
+        msgs.pop_front();
+        return msg;
+    }
+};
+
+// The reply subscription's handlers. Its closure is a shared_ptr to the queue, which the subscription frees once it
+// is closed and its last message handled.
+static void OnReply(natsConnection *, natsSubscription *, natsMsg *msg, void *closure) {
+    auto &queue = **static_cast<shared_ptr<NatsReplyQueue> *>(closure);
+    {
+        std::lock_guard<std::mutex> guard(queue.lock);
+        queue.msgs.push_back(msg);
+    }
+    queue.ready.notify_one();
+}
+
+static void OnRepliesClosed(void *closure) {
+    delete static_cast<shared_ptr<NatsReplyQueue> *>(closure);
+}
+
 // Connection options, freed however the scan's init ends
 struct NatsOptions {
     natsOptions *opts = nullptr;
@@ -619,16 +663,18 @@ struct NatsOptions {
 };
 
 struct NatsScanGlobalState : public GlobalTableFunctionState {
-    // An NKEY secret's key, which conn signs with
+    // An NKEY or CREDS secret's key, which conn signs with
     unique_ptr<NatsNKey> nkey;
     natsConnection *conn = nullptr;
     jsCtx *js = nullptr;
     jsStreamInfo *stream_info = nullptr;
     NatsReadMode mode = NatsReadMode::MSG_GET;
-    // $JS.API.DIRECT.GET.<stream> for batches, $JS.API.STREAM.MSG.GET.<stream> for the JetStream API
+    // $JS.API.DIRECT.GET.<stream> for direct gets, $JS.API.STREAM.MSG.GET.<stream> for the JetStream API
     string get_subject;
+    // Direct gets are answered on inbox, whose subscription queues the replies
     natsInbox *inbox = nullptr;
-    natsSubscription *batch_sub = nullptr;
+    natsSubscription *reply_sub = nullptr;
+    shared_ptr<NatsReplyQueue> replies;
     // A batch was requested and its end has not been read
     bool batch_open = false;
     idx_t batch_msgs = 0;
@@ -648,9 +694,9 @@ struct NatsScanGlobalState : public GlobalTableFunctionState {
     util::JsonPrintOptions json_options;
 
     ~NatsScanGlobalState() {
-        if (batch_sub != nullptr) {
-            natsSubscription_Destroy(batch_sub);
-            batch_sub = nullptr;
+        if (reply_sub != nullptr) {
+            natsSubscription_Destroy(reply_sub);
+            reply_sub = nullptr;
         }
         if (inbox != nullptr) {
             natsInbox_Destroy(inbox);
@@ -771,7 +817,7 @@ static bool ParseDirectGetReply(natsMsg *reply, bool batched, const string &stre
             throw IOException("nats_scan: invalid direct get response from stream '%s'", stream_name);
         }
         status = code;
-        status_text = description ? status + " " + description : status;
+        status_text = description ? status + " " + description : status == "503" ? "503 No Responders" : status;
         return false;
     }
 
@@ -801,14 +847,18 @@ static bool LoadNextMsg(NatsScanGlobalState &state, const string &stream_name, u
     // A direct get, or for streams without allow_direct the JetStream API, which js_GetMsg exposes without
     // next_by_subj
     string request = "{\"seq\":" + std::to_string(seq) + ",\"next_by_subj\":\"" + filter + "\"}";
-    natsMsg *reply = nullptr;
-    natsStatus s = natsConnection_Request(&reply, state.conn, state.get_subject.c_str(), request.c_str(),
-                                          UnsafeNumericCast<int>(request.size()), NATS_TIMEOUT_MS);
-    if (s != NATS_OK) {
-        throw IOException("nats_scan: failed to read stream '%s' at sequence %d: %s", stream_name, seq,
-                          NatsErrorText(s));
-    }
     if (state.mode == NatsReadMode::DIRECT_GET) {
+        natsStatus s = natsConnection_PublishRequest(state.conn, state.get_subject.c_str(), state.inbox,
+                                                     request.c_str(), UnsafeNumericCast<int>(request.size()));
+        if (s != NATS_OK) {
+            throw IOException("nats_scan: failed to read stream '%s' at sequence %d: %s", stream_name, seq,
+                              NatsErrorText(s));
+        }
+        natsMsg *reply = state.replies->Next(NATS_TIMEOUT_MS);
+        if (reply == nullptr) {
+            throw IOException("nats_scan: failed to read stream '%s' at sequence %d: %s", stream_name, seq,
+                              natsStatus_GetText(NATS_TIMEOUT));
+        }
         string status;
         string status_text;
         if (ParseDirectGetReply(reply, false, stream_name, out, status, status_text)) {
@@ -819,6 +869,13 @@ static bool LoadNextMsg(NatsScanGlobalState &state, const string &stream_name, u
             return false;
         }
         throw IOException("nats_scan: failed to read stream '%s' at sequence %d: %s", stream_name, seq, status_text);
+    }
+    natsMsg *reply = nullptr;
+    natsStatus s = natsConnection_Request(&reply, state.conn, state.get_subject.c_str(), request.c_str(),
+                                          UnsafeNumericCast<int>(request.size()), NATS_TIMEOUT_MS);
+    if (s != NATS_OK) {
+        throw IOException("nats_scan: failed to read stream '%s' at sequence %d: %s", stream_name, seq,
+                          NatsErrorText(s));
     }
     try {
         bool found = ParseMsgGetReply(reply, stream_name, out);
@@ -872,10 +929,9 @@ static void SendBatchRequest(NatsScanGlobalState &state, const string &stream_na
 static bool ReadBatchMsg(NatsScanGlobalState &state, const string &stream_name, NatsStoredMsg &out,
                          uint64_t &pending) {
     out.Clear();
-    natsMsg *reply = nullptr;
-    natsStatus s = natsSubscription_NextMsg(&reply, state.batch_sub, NATS_TIMEOUT_MS);
-    if (s != NATS_OK) {
-        throw IOException("nats_scan: failed to read stream '%s': %s", stream_name, NatsErrorText(s));
+    natsMsg *reply = state.replies->Next(NATS_TIMEOUT_MS);
+    if (reply == nullptr) {
+        throw IOException("nats_scan: failed to read stream '%s': %s", stream_name, natsStatus_GetText(NATS_TIMEOUT));
     }
 
     string status;
@@ -895,10 +951,12 @@ static bool ReadBatchMsg(NatsScanGlobalState &state, const string &stream_name, 
     }
     state.batch_msgs++;
 
-    // A server without batched reads answers with this one message, and no end of batch follows
+    // A server without batched reads (a replica not yet upgraded) answers with this one message, with the headers of
+    // a single direct get, and no end of batch follows
     uint64_t unused;
     if (!GetUIntHeader(out.msg, "Nats-Num-Pending", unused)) {
         state.batch_open = false;
+        out.reply_headers = 4;
     }
     return true;
 }
@@ -1001,6 +1059,10 @@ static unique_ptr<GlobalTableFunctionState> NatsScanInitGlobal(ClientContext &co
     }
 
     s = natsOptions_SetTimeout(options.opts, NATS_TIMEOUT_MS);
+    // The scan waits for each request's reply, so the library must not hold requests back to send them together
+    if (s == NATS_OK) {
+        s = natsOptions_SetSendAsap(options.opts, true);
+    }
     if (s == NATS_OK) {
         s = natsOptions_SetURL(options.opts, bind_data.nats_url.c_str());
     }
@@ -1039,23 +1101,27 @@ static unique_ptr<GlobalTableFunctionState> NatsScanInitGlobal(ClientContext &co
     }
 
     bool allow_direct = state->stream_info->Config != nullptr && state->stream_info->Config->AllowDirect;
-    if (allow_direct && ServerReadsBatches(*state->stream_info)) {
-        state->mode = NatsReadMode::BATCH;
+    if (allow_direct) {
+        state->mode = ServerReadsBatches(*state->stream_info) ? NatsReadMode::BATCH : NatsReadMode::DIRECT_GET;
         state->get_subject = "$JS.API.DIRECT.GET." + bind_data.stream_name;
+        state->replies = make_shared_ptr<NatsReplyQueue>();
         s = natsInbox_Create(&state->inbox);
         if (s == NATS_OK) {
-            s = natsConnection_SubscribeSync(&state->batch_sub, state->conn, state->inbox);
+            auto closure = new shared_ptr<NatsReplyQueue>(state->replies);
+            s = natsConnection_Subscribe(&state->reply_sub, state->conn, state->inbox, OnReply, closure);
+            if (s == NATS_OK) {
+                s = natsSubscription_SetOnCompleteCB(state->reply_sub, OnRepliesClosed, closure);
+            } else {
+                delete closure;
+            }
         }
         // A batch is bounded by NATS_BATCH_BYTES, but one message can be larger, so the library must not drop any
         if (s == NATS_OK) {
-            s = natsSubscription_SetPendingLimits(state->batch_sub, -1, -1);
+            s = natsSubscription_SetPendingLimits(state->reply_sub, -1, -1);
         }
         if (s != NATS_OK) {
             throw IOException("Failed to subscribe for replies from NATS: %s", NatsErrorText(s));
         }
-    } else if (allow_direct) {
-        state->mode = NatsReadMode::DIRECT_GET;
-        state->get_subject = "$JS.API.DIRECT.GET." + bind_data.stream_name;
     } else {
         state->mode = NatsReadMode::MSG_GET;
         state->get_subject = "$JS.API.STREAM.MSG.GET." + bind_data.stream_name;

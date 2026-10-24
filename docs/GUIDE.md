@@ -258,7 +258,7 @@ CREATE SECRET prod (
 SELECT count(*) FROM nats_scan('telemetry', url := 'tls://nats.example.com:4222');
 ```
 
-A query uses the secret named by its `secret` option. Without that option, it uses the secret with the longest `SCOPE` that `url` starts with, where the scope ends at the end of a scheme, host or port: `tls://nats.example.com:4222` is for `tls://nats.example.com:4222`, and not for `tls://nats.example.com:42220`. A URL without a scheme counts as `nats://`. A secret without a `SCOPE` applies to every URL that no other secret's scope matches. A query that finds no secret connects without credentials. DuckDB's `which_secret()` matches any start of a URL, so it can name a different secret than the one `nats_scan` uses.
+A query uses the secret named by its `secret` option. Without that option, it uses the secret with the longest `SCOPE` that `url` starts with, where the scope ends at the end of a scheme, host or port: `tls://nats.example.com:4222` is for `tls://nats.example.com:4222`, and not for `tls://nats.example.com:42220`. A URL without a scheme counts as `nats://`, and a user and password in the URL are not matched. A secret without a `SCOPE` applies to every URL that no other secret's scope matches. A query that finds no secret connects without credentials. DuckDB's `which_secret()` matches any start of a URL, so it can name a different secret than the one `nats_scan` uses.
 
 A secret holds at most one way to sign in:
 

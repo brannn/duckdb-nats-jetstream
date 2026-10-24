@@ -66,8 +66,30 @@ void NatsSecret::Register(ExtensionLoader &loader) {
     loader.RegisterFunction(function);
 }
 
-static bool IsScopeBoundary(char c) {
-    return c == ':' || c == '/' || c == ',';
+// The URL that scopes are matched with: without a scheme it is a nats:// URL, and its user and password are left out
+static string ScopeURL(const string &url) {
+    auto result = url.substr(0, url.find(',')).find("://") == string::npos ? "nats://" + url : url;
+    auto start = result.find("://") + 3;
+    auto at = result.find('@', start);
+    auto end = result.find_first_of("/,", start);
+    if (at != string::npos && (end == string::npos || at < end)) {
+        result.erase(start, at + 1 - start);
+    }
+    return result;
+}
+
+// Whether a scope that url starts with, pos characters long, ends where a scheme, host or port does. A colon in an
+// IPv6 address ([::1]) ends none.
+static bool IsScopeEnd(const string &url, idx_t pos) {
+    if (pos == url.size() || url[pos - 1] == '/' || url[pos] == '/' || url[pos] == ',') {
+        return true;
+    }
+    if (url[pos] != ':') {
+        return false;
+    }
+    auto open = url.rfind('[', pos);
+    auto close = url.rfind(']', pos);
+    return open == string::npos || (close != string::npos && close > open);
 }
 
 // The secret whose scope best matches url. DuckDB matches a scope as any start of the URL; here it must also end where
@@ -86,9 +108,7 @@ static unique_ptr<SecretEntry> LookupScopedSecret(SecretManager &secret_manager,
             best_score = 0;
         }
         for (auto &scope : scopes) {
-            if (!scope.empty() && !(StringUtil::StartsWith(url, scope) &&
-                                    (url.size() == scope.size() || IsScopeBoundary(scope.back()) ||
-                                     IsScopeBoundary(url[scope.size()])))) {
+            if (!scope.empty() && !(StringUtil::StartsWith(url, scope) && IsScopeEnd(url, scope.size()))) {
                 continue;
             }
             auto score = NumericCast<int64_t>(scope.size());
@@ -117,9 +137,7 @@ NatsConnectionSettings NatsSecret::Lookup(ClientContext &context, const string &
             throw BinderException("nats_scan: no NATS secret named '%s'", name);
         }
     } else {
-        // A URL without a scheme is a nats:// URL
-        entry = LookupScopedSecret(secret_manager, transaction,
-                                   url.find("://") == string::npos ? "nats://" + url : url);
+        entry = LookupScopedSecret(secret_manager, transaction, ScopeURL(url));
         if (!entry) {
             return settings;
         }
@@ -240,6 +258,29 @@ NatsNKey::~NatsNKey() {
     EVP_PKEY_free(key);
 }
 
+// The user JWT of a credentials file: the word after its BEGIN line, as nsc writes it
+static string ReadUserJWT(const string &creds_file, const string &text) {
+    static constexpr const char *BEGIN = "-----BEGIN NATS USER JWT-----";
+    string jwt;
+    auto pos = text.find(BEGIN);
+    if (pos != string::npos) {
+        pos += strlen(BEGIN);
+        while (pos < text.size() && StringUtil::CharacterIsSpace(text[pos])) {
+            pos++;
+        }
+        auto end = pos;
+        while (end < text.size() && !StringUtil::CharacterIsSpace(text[end])) {
+            end++;
+        }
+        jwt = text.substr(pos, end - pos);
+    }
+    // Without a JWT the client library would send the whole file, seed and all, as the JWT
+    if (jwt.empty() || jwt[0] == '-') {
+        throw IOException("'%s' is not a NATS credentials file: it has no user JWT", creds_file);
+    }
+    return jwt;
+}
+
 // The user NKey whose seed is the first word of the file that looks like one, as `nats` and nsc write them
 static unique_ptr<NatsNKey> ReadNKey(const string &seed_file, const string &text) {
     auto nkey = make_uniq<NatsNKey>();
@@ -286,10 +327,19 @@ static string NKeyPublicKey(const string &seed_file, const NatsNKey &nkey) {
     return Base32Encode(encoded);
 }
 
-// The client library's signature handler; it frees the signature and error text with free
+// The client library's handlers for an NKey; it frees what they return with free
+static natsStatus GetUserJWT(char **jwt, char **error, void *closure) {
+    *jwt = strdup(static_cast<NatsNKey *>(closure)->jwt.c_str());
+    return *jwt != nullptr ? NATS_OK : NATS_NO_MEMORY;
+}
+
 static natsStatus SignNonce(char **error, unsigned char **signature, int *signature_len, const char *nonce,
                             void *closure) {
     auto &nkey = *static_cast<NatsNKey *>(closure);
+    // A server that does not ask for a signature sends no nonce
+    if (nonce == nullptr) {
+        nonce = "";
+    }
     size_t len = 64;
     auto result = static_cast<unsigned char *>(malloc(len));
     EVP_MD_CTX *ctx = EVP_MD_CTX_new();
@@ -316,13 +366,13 @@ natsStatus NatsSecret::Apply(ClientContext &context, const NatsConnectionSetting
     } else if (!settings.token.empty()) {
         s = natsOptions_SetToken(opts, settings.token.c_str());
     } else if (!settings.creds.empty()) {
+        // Read here rather than by the client library, which would keep a copy of the seed
         SecretFileContents creds;
         ReadSecretFile(context, settings.creds, &creds);
-        // Without a JWT the client library would send the whole file, seed and all, as the JWT
-        if (creds.data.find("-----BEGIN NATS USER JWT-----") == string::npos) {
-            throw IOException("'%s' is not a NATS credentials file: it has no user JWT", settings.creds);
-        }
-        s = natsOptions_SetUserCredentialsFromMemory(opts, creds.data.c_str());
+        auto jwt = ReadUserJWT(settings.creds, creds.data);
+        nkey = ReadNKey(settings.creds, creds.data);
+        nkey->jwt = std::move(jwt);
+        s = natsOptions_SetUserCredentialsCallbacks(opts, GetUserJWT, nkey.get(), SignNonce, nkey.get());
     } else if (!settings.nkey.empty()) {
         SecretFileContents seed;
         ReadSecretFile(context, settings.nkey, &seed);

@@ -393,6 +393,35 @@ SELECT * FROM nats_scan('s', url := 'nats://localhost:42733');
 ----
 Failed to connect to NATS at 'nats://localhost:42733'
 
+# a URL without a scheme, first in a list, is a nats:// URL
+statement error
+SELECT * FROM nats_scan('s', url := '127.0.0.1:4273,nats://127.0.0.1:4274');
+----
+Cannot use NATS secret 'port_4273'
+
+# the user and password in a URL are not its host, and a colon in an IPv6 address ends no scope
+statement ok
+CREATE SECRET user_bob (TYPE nats, NKEY 'test/proto/event.proto', SCOPE 'nats://bob');
+
+statement ok
+CREATE SECRET ipv6_prefix (TYPE nats, NKEY 'test/proto/event.proto', SCOPE 'nats://[::');
+
+statement error
+SELECT * FROM nats_scan('s', url := 'nats://bob:pw@127.0.0.1:42733');
+----
+Failed to connect to NATS
+
+statement error
+SELECT * FROM nats_scan('s', url := 'nats://[::1]:42733');
+----
+Failed to connect to NATS
+
+statement ok
+DROP SECRET user_bob;
+
+statement ok
+DROP SECRET ipv6_prefix;
+
 statement ok
 DROP SECRET port_4273;
 
