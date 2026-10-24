@@ -15,8 +15,8 @@ endif
 
 # Integration tests: test/fixtures/serve.sh runs test/sql/integration against nats-server serving copies of the
 # test/fixtures/jetstream store. Locally it needs nats-server on the PATH (or NATS_SERVER=/path/to/nats-server) and a
-# release build. CI sets NATS_SERVER_VERSIONS, so that on Linux x86-64 the whole test run has servers of each of those
-# versions, which serve.sh downloads.
+# release build. CI sets NATS_SERVER_VERSIONS, so that on Linux x86-64 and macOS arm64 the whole test run has servers of
+# each of those versions, which serve.sh downloads.
 NATS_SERVER ?= nats-server
 export NATS_SERVER
 
@@ -25,7 +25,7 @@ test_integration:
 	@test/fixtures/serve.sh ./build/release/$(TEST_PATH) --require nats_js "$(PROJ_DIR)test/sql/integration/*"
 
 ifneq ($(NATS_SERVER_VERSIONS),)
-ifeq ($(shell uname -s)-$(shell uname -m),Linux-x86_64)
+ifneq ($(filter $(shell uname -s)-$(shell uname -m),Linux-x86_64 Darwin-arm64),)
 TEST_RUNNER := $(PROJ_DIR)test/fixtures/serve.sh $(TEST_RUNNER)
 endif
 endif

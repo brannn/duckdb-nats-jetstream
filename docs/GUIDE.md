@@ -344,7 +344,7 @@ make test_integration   # tests against a real nats-server
 
 `make test_integration` runs `test/sql/integration` through `test/fixtures/serve.sh`. That script serves two copies of the JetStream store in `test/fixtures/jetstream` with `nats-server`: one without auth on port 42222, and one on port 42223 that wants TLS and a user (`test/fixtures/auth`). It needs `nats-server` on the `PATH`, or `NATS_SERVER=/path/to/nats-server`. The store holds synthetic messages with fixed sequences and timestamps; `test/fixtures/make-jetstream-store.sh` regenerates it, using nats-server, the nats CLI and protoc.
 
-On Linux x86-64, CI runs every test against nats-server 2.10 and 2.15, which `serve.sh` downloads and checks against pinned SHA-256 sums.
+On Linux x86-64 and macOS, CI runs every test against nats-server 2.10 and 2.15, which `serve.sh` downloads and checks against pinned SHA-256 sums.
 
 ### Demo Data
 

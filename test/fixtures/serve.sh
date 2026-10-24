@@ -2,33 +2,54 @@
 # Runs a command while nats-server serves copies of test/fixtures/jetstream: without auth at $NATS_JS_TEST_URL, and
 # with TLS and users (test/fixtures/auth/server.conf) at $NATS_JS_TEST_AUTH_URL.
 #   test/fixtures/serve.sh <command> [args...]
-# The server is $NATS_SERVER, or nats-server on the PATH. With NATS_SERVER_VERSIONS (CI, on Linux x86-64), the command
-# runs once for each version listed, downloaded from the nats-server releases and checked against the SHA256 below.
+# The server is $NATS_SERVER, or nats-server on the PATH. With NATS_SERVER_VERSIONS (CI, on Linux x86-64 and macOS
+# arm64), the command runs once for each version listed, downloaded from the nats-server releases and checked against
+# the SHA256 below.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 PORT=${NATS_JS_TEST_PORT:-42222}
 WORK=build/nats-test
 
-# SHA256 of nats-server-v<version>-linux-amd64.tar.gz, from the release's SHA256SUMS
+case "$(uname -s)-$(uname -m)" in
+    Linux-x86_64) PLATFORM=linux-amd64 ;;
+    Darwin-arm64) PLATFORM=darwin-arm64 ;;
+    *) PLATFORM=unknown ;;
+esac
+
+# SHA256 of nats-server-v<version>-<platform>.tar.gz, from the release's SHA256SUMS
 sha256_of() {
-    case "$1" in
-        2.10.29) echo e314da74a83a1d3876db8814c27eb990fe729640fd6452025b441bcede8390da ;;
-        2.15.1) echo bf5edc7b1ce98e885c368cb43a886eb148dc5d0551d99f3cf6141fb5e1954c70 ;;
-        *) echo "serve.sh: no checksum for nats-server $1" >&2; return 1 ;;
+    case "$1-$PLATFORM" in
+        2.10.29-linux-amd64) echo e314da74a83a1d3876db8814c27eb990fe729640fd6452025b441bcede8390da ;;
+        2.10.29-darwin-arm64) echo d7d8277882679d072c12f200c7b7006ee19aece00d2a0d75c3fbf2bf7fbd08ba ;;
+        2.15.1-linux-amd64) echo bf5edc7b1ce98e885c368cb43a886eb148dc5d0551d99f3cf6141fb5e1954c70 ;;
+        2.15.1-darwin-arm64) echo ed0fe39222ec2e317c4d0e1a9cdc16c63ec523d94f9355d24a902a4db2655ffd ;;
+        *) echo "serve.sh: no checksum for nats-server $1 on $PLATFORM" >&2; return 1 ;;
     esac
+}
+
+sha256() {
+    if command -v sha256sum > /dev/null; then
+        sha256sum "$1" | cut -d ' ' -f 1
+    else
+        shasum -a 256 "$1" | cut -d ' ' -f 1
+    fi
 }
 
 download() {
     local version=$1
     local dir=build/nats-server-v$version
     if [ ! -x "$dir/nats-server" ]; then
-        local sha256 tarball=build/nats-server-v$version.tar.gz
-        sha256=$(sha256_of "$version")
+        local expected tarball=build/nats-server-v$version.tar.gz
+        expected=$(sha256_of "$version")
         mkdir -p "$dir"
         curl -fsSL -o "$tarball" \
-            "https://github.com/nats-io/nats-server/releases/download/v$version/nats-server-v$version-linux-amd64.tar.gz"
-        echo "$sha256  $tarball" | sha256sum -c - > /dev/null
+            "https://github.com/nats-io/nats-server/releases/download/v$version/nats-server-v$version-$PLATFORM.tar.gz"
+        if [ "$(sha256 "$tarball")" != "$expected" ]; then
+            echo "serve.sh: $tarball does not match its SHA256" >&2
+            rm -f "$tarball"
+            return 1
+        fi
         tar xzf "$tarball" -C "$dir" --strip-components 1
     fi
     echo "$dir/nats-server"
@@ -73,7 +94,8 @@ run() {
 
 if [ -n "${NATS_SERVER_VERSIONS:-}" ]; then
     for version in $NATS_SERVER_VERSIONS; do
-        run "$(download "$version")" "$@"
+        server=$(download "$version")
+        run "$server" "$@"
     done
 else
     run "${NATS_SERVER:-nats-server}" "$@"
