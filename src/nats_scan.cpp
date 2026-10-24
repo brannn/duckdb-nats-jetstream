@@ -257,11 +257,33 @@ static const Descriptor *FindProtoMessage(const DescriptorPool &pool, const File
 // The filter is sent to the server inside a JSON request, so it must be a plain subject
 static bool IsPlainSubject(const string &subject) {
     for (char c : subject) {
-        if (c == '"' || c == '\\' || StringUtil::CharacterIsSpace(c)) {
+        if (c == '"' || c == '\\' || StringUtil::CharacterIsSpace(c) || static_cast<unsigned char>(c) < 0x20) {
             return false;
         }
     }
     return true;
+}
+
+// A subject without wildcard or empty tokens, which as a filter matches only itself. The server reads a '>' token
+// before the end differently from version to version, so WHERE conditions push down only such subjects.
+static bool IsLiteralSubject(const string &subject) {
+    // The server's default max_control_line keeps stored subjects shorter
+    static constexpr idx_t MAX_SUBJECT_LENGTH = 4096;
+    if (subject.size() > MAX_SUBJECT_LENGTH || !IsPlainSubject(subject)) {
+        return false;
+    }
+    idx_t start = 0;
+    while (true) {
+        auto end = subject.find('.', start);
+        auto token = subject.substr(start, end == string::npos ? string::npos : end - start);
+        if (token.empty() || token == "*" || token == ">") {
+            return false;
+        }
+        if (end == string::npos) {
+            return true;
+        }
+        start = end + 1;
+    }
 }
 
 static string GetStringOption(const Value &value, const string &option) {
@@ -463,6 +485,8 @@ struct NatsStoredMsg {
     string data_buf;
     // The message's header block, "NATS/1.0\r\nKey: Value\r\n...", when msg is not set
     string headers_buf;
+    // How many of REPLY_HEADERS the server appended to msg
+    idx_t reply_headers = 0;
 
     void Clear() {
         if (msg != nullptr) {
@@ -476,13 +500,27 @@ struct NatsStoredMsg {
     }
 };
 
-// Headers the server adds to a direct get reply, which are not the message's own
-static bool IsReplyHeader(const char *key) {
-    static const char *const REPLY_HEADERS[] = {"Nats-Stream",      "Nats-Subject",       "Nats-Sequence",
-                                                "Nats-Time-Stamp",  "Nats-Num-Pending",   "Nats-Last-Sequence",
-                                                "Nats-UpTo-Sequence"};
-    for (auto reply_header : REPLY_HEADERS) {
-        if (strcmp(key, reply_header) == 0) {
+// The headers the server appends to a direct get reply, after the message's own: the first four on every reply, all
+// six on a batched one. A message can have the same keys itself (one republished from another stream does), so the
+// server's value of each is the last.
+static const char *const REPLY_HEADERS[] = {"Nats-Stream",     "Nats-Subject",     "Nats-Sequence",
+                                            "Nats-Time-Stamp", "Nats-Num-Pending", "Nats-Last-Sequence"};
+
+static const char *LastHeader(natsMsg *msg, const char *key) {
+    const char **values = nullptr;
+    int count = 0;
+    if (natsMsgHeader_Values(msg, key, &values, &count) != NATS_OK || count == 0) {
+        return nullptr;
+    }
+    // The array is the caller's, the strings the message's
+    const char *last = values[count - 1];
+    free((void *)values);
+    return last;
+}
+
+static bool IsReplyHeader(const NatsStoredMsg &msg, const char *key) {
+    for (idx_t i = 0; i < msg.reply_headers; i++) {
+        if (strcmp(key, REPLY_HEADERS[i]) == 0) {
             return true;
         }
     }
@@ -536,8 +574,12 @@ static Value HeadersValue(NatsStoredMsg &msg) {
         for (int i = 0; i < key_count; i++) {
             const char **values = nullptr;
             int value_count = 0;
-            if (IsReplyHeader(keys[i]) || natsMsgHeader_Values(msg.msg, keys[i], &values, &value_count) != NATS_OK) {
+            if (natsMsgHeader_Values(msg.msg, keys[i], &values, &value_count) != NATS_OK) {
                 continue;
+            }
+            // Leave out the server's value
+            if (IsReplyHeader(msg, keys[i])) {
+                value_count--;
             }
             for (int j = 0; j < value_count; j++) {
                 AddHeader(headers, keys[i], values[j], strlen(values[j]));
@@ -684,38 +726,63 @@ static bool ParseMsgGetReply(natsMsg *reply, const string &stream_name, NatsStor
     return true;
 }
 
+static bool GetUIntHeader(natsMsg *msg, const char *key, uint64_t &result) {
+    const char *value = LastHeader(msg, key);
+    if (value == nullptr || !StringUtil::CharacterIsDigit(*value)) {
+        return false;
+    }
+    char *end = nullptr;
+    errno = 0;
+    result = strtoull(value, &end, 10);
+    return errno == 0 && *end == '\0';
+}
+
+// Parses a direct get reply, which out takes over. A stored message always comes with the server's Nats-Sequence
+// header; any other reply is a status, such as 404 (no message) or 204 (end of batch), returned in status with its
+// description in status_text. A stored message's own Status header is not one.
+static bool ParseDirectGetReply(natsMsg *reply, bool batched, const string &stream_name, NatsStoredMsg &out,
+                                string &status, string &status_text) {
+    out.Clear();
+    out.msg = reply;
+    out.reply_headers = batched ? 6 : 4;
+    if (LastHeader(reply, "Nats-Sequence") == nullptr) {
+        const char *code = nullptr;
+        const char *description = nullptr;
+        natsMsgHeader_Get(reply, "Status", &code);
+        natsMsgHeader_Get(reply, "Description", &description);
+        if (code == nullptr) {
+            throw IOException("nats_scan: invalid direct get response from stream '%s'", stream_name);
+        }
+        status = code;
+        status_text = description ? status + " " + description : status;
+        return false;
+    }
+
+    const char *subject = LastHeader(reply, "Nats-Subject");
+    const char *time = LastHeader(reply, "Nats-Time-Stamp");
+    timestamp_ns_t time_ns;
+    if (!GetUIntHeader(reply, "Nats-Sequence", out.seq) || subject == nullptr || time == nullptr ||
+        Timestamp::TryConvertTimestamp(time, strlen(time), time_ns, true) != TimestampCastResult::SUCCESS) {
+        throw IOException("nats_scan: invalid direct get response from stream '%s'", stream_name);
+    }
+    out.time_ns = Timestamp::GetEpochNanoSeconds(time_ns);
+    out.subject = subject;
+    out.subject_len = strlen(subject);
+    out.data = natsMsg_GetData(reply);
+    out.data_len = UnsafeNumericCast<idx_t>(natsMsg_GetDataLength(reply));
+    if (out.data == nullptr) {
+        out.data = "";
+    }
+    return true;
+}
+
 // Loads the first message at or after seq whose subject matches filter ('>' matches all).
 // Returns false if there is none.
 static bool LoadNextMsg(NatsScanGlobalState &state, const string &stream_name, uint64_t seq, const string &filter,
                         NatsStoredMsg &out) {
     out.Clear();
-    if (state.mode == NatsReadMode::DIRECT_GET) {
-        jsDirectGetMsgOptions opts;
-        jsDirectGetMsgOptions_Init(&opts);
-        opts.Sequence = seq;
-        opts.NextBySubject = filter.c_str();
-
-        natsStatus s = js_DirectGetMsg(&out.msg, state.js, stream_name.c_str(), nullptr, &opts);
-        if (s == NATS_NOT_FOUND) {
-            return false;
-        }
-        if (s != NATS_OK) {
-            throw IOException("nats_scan: failed to read stream '%s' at sequence %d: %s", stream_name, seq,
-                              NatsErrorText(s));
-        }
-        out.seq = natsMsg_GetSequence(out.msg);
-        out.time_ns = natsMsg_GetTime(out.msg);
-        out.subject = natsMsg_GetSubject(out.msg);
-        out.subject_len = strlen(out.subject);
-        out.data = natsMsg_GetData(out.msg);
-        out.data_len = UnsafeNumericCast<idx_t>(natsMsg_GetDataLength(out.msg));
-        if (out.data == nullptr) {
-            out.data = "";
-        }
-        return true;
-    }
-
-    // Streams without allow_direct only answer the JetStream API, which js_GetMsg exposes without next_by_subj
+    // A direct get, or for streams without allow_direct the JetStream API, which js_GetMsg exposes without
+    // next_by_subj
     string request = "{\"seq\":" + std::to_string(seq) + ",\"next_by_subj\":\"" + filter + "\"}";
     natsMsg *reply = nullptr;
     natsStatus s = natsConnection_Request(&reply, state.conn, state.get_subject.c_str(), request.c_str(),
@@ -723,6 +790,18 @@ static bool LoadNextMsg(NatsScanGlobalState &state, const string &stream_name, u
     if (s != NATS_OK) {
         throw IOException("nats_scan: failed to read stream '%s' at sequence %d: %s", stream_name, seq,
                           NatsErrorText(s));
+    }
+    if (state.mode == NatsReadMode::DIRECT_GET) {
+        string status;
+        string status_text;
+        if (ParseDirectGetReply(reply, false, stream_name, out, status, status_text)) {
+            return true;
+        }
+        out.Clear();
+        if (status == "404") {
+            return false;
+        }
+        throw IOException("nats_scan: failed to read stream '%s' at sequence %d: %s", stream_name, seq, status_text);
     }
     try {
         bool found = ParseMsgGetReply(reply, stream_name, out);
@@ -771,63 +850,31 @@ static void SendBatchRequest(NatsScanGlobalState &state, const string &stream_na
     state.batch_msgs = 0;
 }
 
-static bool GetUIntHeader(natsMsg *msg, const char *key, uint64_t &result) {
-    const char *value = nullptr;
-    if (natsMsgHeader_Get(msg, key, &value) != NATS_OK || value == nullptr || !StringUtil::CharacterIsDigit(*value)) {
-        return false;
-    }
-    char *end = nullptr;
-    errno = 0;
-    result = strtoull(value, &end, 10);
-    return errno == 0 && *end == '\0';
-}
-
 // Reads the open batch's next message. At the end of the batch, returns false with the number of matching messages
 // that follow it in the stream.
 static bool ReadBatchMsg(NatsScanGlobalState &state, const string &stream_name, NatsStoredMsg &out,
                          uint64_t &pending) {
     out.Clear();
-    natsStatus s = natsSubscription_NextMsg(&out.msg, state.batch_sub, NATS_TIMEOUT_MS);
+    natsMsg *reply = nullptr;
+    natsStatus s = natsSubscription_NextMsg(&reply, state.batch_sub, NATS_TIMEOUT_MS);
     if (s != NATS_OK) {
         throw IOException("nats_scan: failed to read stream '%s': %s", stream_name, NatsErrorText(s));
     }
 
-    const char *status = nullptr;
-    if (natsMsgHeader_Get(out.msg, "Status", &status) == NATS_OK) {
+    string status;
+    string status_text;
+    if (!ParseDirectGetReply(reply, true, stream_name, out, status, status_text)) {
         state.batch_open = false;
-        string code(status);
-        const char *description = nullptr;
-        natsMsgHeader_Get(out.msg, "Description", &description);
-        string text = description ? code + " " + description : code;
         // An end of batch after no message would ask for the same batch again
-        bool more = code == "204" && state.batch_msgs > 0 && GetUIntHeader(out.msg, "Nats-Num-Pending", pending);
+        bool more = status == "204" && state.batch_msgs > 0 && GetUIntHeader(out.msg, "Nats-Num-Pending", pending);
         out.Clear();
-        if (code == "204" || code == "404") {
+        if (status == "204" || status == "404") {
             if (!more) {
                 pending = 0;
             }
             return false;
         }
-        throw IOException("nats_scan: failed to read stream '%s': %s", stream_name, text);
-    }
-
-    const char *subject = nullptr;
-    const char *time = nullptr;
-    timestamp_ns_t time_ns;
-    if (!GetUIntHeader(out.msg, "Nats-Sequence", out.seq) ||
-        natsMsgHeader_Get(out.msg, "Nats-Subject", &subject) != NATS_OK ||
-        natsMsgHeader_Get(out.msg, "Nats-Time-Stamp", &time) != NATS_OK ||
-        Timestamp::TryConvertTimestamp(time, strlen(time), time_ns, true) != TimestampCastResult::SUCCESS) {
-        out.Clear();
-        throw IOException("nats_scan: invalid message get response from stream '%s'", stream_name);
-    }
-    out.time_ns = Timestamp::GetEpochNanoSeconds(time_ns);
-    out.subject = subject;
-    out.subject_len = strlen(subject);
-    out.data = natsMsg_GetData(out.msg);
-    out.data_len = UnsafeNumericCast<idx_t>(natsMsg_GetDataLength(out.msg));
-    if (out.data == nullptr) {
-        out.data = "";
+        throw IOException("nats_scan: failed to read stream '%s': %s", stream_name, status_text);
     }
     state.batch_msgs++;
 
@@ -868,7 +915,7 @@ static bool ReadNextMsg(NatsScanGlobalState &state, const string &stream_name, c
 }
 
 // The first message at or after the given time whose subject matches filter, which the server finds itself.
-// time_us must be from 1970 to 9999, the range the server reads.
+// time_us must be from 1970 to 2262-04-11 23:47:16.854775, the range the server reads.
 static bool FindFirstSeqAtTimeBatched(NatsScanGlobalState &state, const string &stream_name, int64_t time_us,
                                       const string &filter, uint64_t &result) {
     auto time = Timestamp::ToString(timestamp_t(time_us));
@@ -984,6 +1031,7 @@ static unique_ptr<GlobalTableFunctionState> NatsScanInitGlobal(ClientContext &co
         }
     } else if (allow_direct) {
         state->mode = NatsReadMode::DIRECT_GET;
+        state->get_subject = "$JS.API.DIRECT.GET." + bind_data.stream_name;
     } else {
         state->mode = NatsReadMode::MSG_GET;
         state->get_subject = "$JS.API.STREAM.MSG.GET." + bind_data.stream_name;
@@ -999,16 +1047,17 @@ static unique_ptr<GlobalTableFunctionState> NatsScanInitGlobal(ClientContext &co
     }
 
     if (bind_data.has_start_time) {
-        // 1 January 10000, past the times the server reads
-        static constexpr int64_t TIME_LIMIT_US = 253402300800000000LL;
+        // The server keeps message times in int64 nanoseconds, so none is after 2262-04-11 23:47:16.854775, and it
+        // reads a later start time wrong
+        static constexpr int64_t TIME_LIMIT_US = NumericLimits<int64_t>::Maximum() / 1000;
         const string &filter = bind_data.subject_filter.empty() ? string(">") : bind_data.subject_filter;
         uint64_t seq = next_seq;
         bool found = true;
-        if (state->mode != NatsReadMode::BATCH) {
+        if (bind_data.start_time_us > TIME_LIMIT_US) {
+            found = false;
+        } else if (state->mode != NatsReadMode::BATCH) {
             found = FindFirstSeqAtTime(*state, bind_data.stream_name, bind_data.start_time_us, next_seq,
                                        state->last_seq, seq);
-        } else if (bind_data.start_time_us >= TIME_LIMIT_US) {
-            found = false;
         } else if (bind_data.start_time_us > 0) {
             found = FindFirstSeqAtTimeBatched(*state, bind_data.stream_name, bind_data.start_time_us, filter, seq);
         }
@@ -1419,7 +1468,7 @@ static void PushdownComparison(NatsScanBindData &bind_data, idx_t column, Expres
         }
     } else if (column == COL_SUBJECT && comparison == ExpressionType::COMPARE_EQUAL && !bind_data.subject_given) {
         auto subject = StringValue::Get(constant);
-        if (!subject.empty() && IsPlainSubject(subject)) {
+        if (IsLiteralSubject(subject)) {
             bind_data.subject_filter = subject;
         }
     }
@@ -1464,7 +1513,7 @@ static void PushdownFilter(ClientContext &context, const LogicalGet &get, NatsSc
             FilterColumn(get, *function.GetChildren()[0]) == COL_SUBJECT && bind_data.subject_filter.empty() &&
             FilterConstant(context, *function.GetChildren()[1], constant)) {
             auto prefix = StringValue::Get(constant);
-            if (prefix.size() > 1 && prefix.back() == '.' && IsPlainSubject(prefix)) {
+            if (prefix.size() > 1 && prefix.back() == '.' && IsLiteralSubject(prefix.substr(0, prefix.size() - 1))) {
                 bind_data.subject_filter = prefix + ">";
             }
         }

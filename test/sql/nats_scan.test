@@ -260,6 +260,11 @@ SELECT * FROM nats_scan('s', subject := 'a"b');
 ----
 nats_scan: invalid subject filter
 
+statement error
+SELECT * FROM nats_scan('s', subject := 'a' || chr(1));
+----
+nats_scan: invalid subject filter
+
 # WHERE clauses on seq, ts_nats and subject narrow the range the scan reads, which EXPLAIN shows
 query II
 EXPLAIN SELECT * FROM nats_scan('s') WHERE seq BETWEEN 3 AND 8;
@@ -295,6 +300,37 @@ physical_plan	<REGEX>:.*Subject: orders.eu.>.*
 
 query II
 EXPLAIN SELECT * FROM nats_scan('s') WHERE subject LIKE 'orders.e%';
+----
+physical_plan	<!REGEX>:.*Subject.*
+
+# a subject with a wildcard or empty token, or one the server would not read, is left to DuckDB
+query II
+EXPLAIN SELECT * FROM nats_scan('s') WHERE subject = 'orders.>.failed';
+----
+physical_plan	<!REGEX>:.*Subject.*
+
+query II
+EXPLAIN SELECT * FROM nats_scan('s') WHERE subject = 'orders.*';
+----
+physical_plan	<!REGEX>:.*Subject.*
+
+query II
+EXPLAIN SELECT * FROM nats_scan('s') WHERE subject LIKE 'orders.>.%';
+----
+physical_plan	<!REGEX>:.*Subject.*
+
+query II
+EXPLAIN SELECT * FROM nats_scan('s') WHERE subject LIKE 'orders..%';
+----
+physical_plan	<!REGEX>:.*Subject.*
+
+query II
+EXPLAIN SELECT * FROM nats_scan('s') WHERE subject = 'orders.eu' || chr(1);
+----
+physical_plan	<!REGEX>:.*Subject.*
+
+query II
+EXPLAIN SELECT * FROM nats_scan('s') WHERE subject = repeat('a', 5000);
 ----
 physical_plan	<!REGEX>:.*Subject.*
 

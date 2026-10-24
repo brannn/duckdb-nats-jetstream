@@ -83,6 +83,18 @@ add_streams_0_4() {
     # many: more messages than two batches hold
     n stream add many --subjects 'many.>' --storage file --allow-direct --defaults > /dev/null
     n pub many.x '{"i":{{Count}}}' --count 4100 > /dev/null 2>&1
+
+    # replies: messages with headers the server also puts on its replies: a Status, and from replies_src, which
+    # republishes into it, Nats-Stream, Nats-Subject, Nats-Sequence and the rest
+    n stream add replies --subjects 'replies.>' --storage file --allow-direct --defaults > /dev/null
+    pub replies.own '{"n":1}'
+    pub replies.own '' -H 'Status:404'
+    pub replies.own '{"n":3}' -H 'Status:204' -H 'Description:No Messages'
+    pub replies.own '{"n":4}' -H 'Status:shipped'
+    n stream add replies_src --subjects 'replies_src.>' --storage file --allow-direct --defaults \
+        --republish-source 'replies_src.>' --republish-destination 'replies.>' > /dev/null
+    pub replies_src.a '{"n":5}'
+    pub replies_src.b '{"n":6}'
 }
 add_streams_0_4
 

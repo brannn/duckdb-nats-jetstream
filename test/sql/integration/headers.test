@@ -33,3 +33,35 @@ SELECT list(seq) FROM nats_scan('hdrs', url := '{NATS_JS_TEST_URL}', json_extrac
 WHERE headers['Content-Type'][1] = 'application/json';
 ----
 [3]
+
+# a message's own Status header does not make it a status reply, and one republished from another stream (replies_src)
+# keeps the Nats-Stream, Nats-Subject and Nats-Sequence headers it came with, while seq, subject and ts_nats are its own
+query IIII
+SELECT seq, subject, decode(payload), headers FROM nats_scan('replies', url := '{NATS_JS_TEST_URL}');
+----
+1	replies.own	{"n":1}	{}
+2	replies.own	(empty)	{Status=[404]}
+3	replies.own	{"n":3}	{Description=[No Messages], Status=[204]}
+4	replies.own	{"n":4}	{Status=[shipped]}
+5	replies.a	{"n":5}	{Nats-Last-Sequence=[0], Nats-Sequence=[1], Nats-Stream=[replies_src], Nats-Subject=[replies_src.a], Nats-Time-Stamp=['2026-10-24T22:54:38.863309Z']}
+6	replies.b	{"n":6}	{Nats-Last-Sequence=[0], Nats-Sequence=[2], Nats-Stream=[replies_src], Nats-Subject=[replies_src.b], Nats-Time-Stamp=['2026-10-24T22:54:38.873786Z']}
+
+query III
+SELECT seq, subject, ts_nats FROM nats_scan('replies', url := '{NATS_JS_TEST_URL}', start_seq := 5, end_seq := 5);
+----
+5	replies.a	2026-10-24 22:54:38.863372
+
+query I
+SELECT list(seq) FROM nats_scan('replies', url := '{NATS_JS_TEST_URL}', subject := 'replies.own', start_seq := 2);
+----
+[2, 3, 4]
+
+query I
+SELECT list(seq) FROM nats_scan('replies', url := '{NATS_JS_TEST_URL}', start_time := TIMESTAMP '2026-10-24 22:54:38.85');
+----
+[5, 6]
+
+query I
+SELECT list(seq) FROM nats_scan('replies', url := '{NATS_JS_TEST_URL}') WHERE headers['Status'][1] = '204';
+----
+[3]

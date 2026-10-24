@@ -121,6 +121,38 @@ SELECT count(*) FROM nats_scan('gaps', url := '{NATS_JS_TEST_URL}', end_time := 
 ----
 0
 
+# the server keeps times in int64 nanoseconds, so it stores none after 2262-04-11 23:47:16.854775
+query I
+SELECT count(*) FROM nats_scan('gaps', url := '{NATS_JS_TEST_URL}', start_time := TIMESTAMP '2262-04-11 23:47:16.854775');
+----
+0
+
+query I
+SELECT count(*) FROM nats_scan('gaps', url := '{NATS_JS_TEST_URL}', start_time := TIMESTAMP '2262-04-11 23:47:16.854776');
+----
+0
+
+query I
+SELECT count(*) FROM nats_scan('gaps', url := '{NATS_JS_TEST_URL}', start_time := TIMESTAMP '9999-12-31 23:59:59.999999');
+----
+0
+
+query I
+SELECT count(*) FROM nats_scan('gaps', url := '{NATS_JS_TEST_URL}') WHERE ts_nats > TIMESTAMP '2300-01-01';
+----
+0
+
+query I
+SELECT count(*) FROM nats_scan('gaps', url := '{NATS_JS_TEST_URL}', end_time := TIMESTAMP '9999-12-31');
+----
+7
+
+# a subject with control characters gets no rows, not an error from the server
+query I
+SELECT count(*) FROM nats_scan('events', url := '{NATS_JS_TEST_URL}') WHERE subject = 'events.site1.power' || chr(1);
+----
+0
+
 # filters on the result agree with the scan options
 query I
 SELECT list(seq ORDER BY seq) FROM nats_scan('gaps', url := '{NATS_JS_TEST_URL}')

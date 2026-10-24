@@ -63,7 +63,7 @@ FROM nats_scan('telemetry',
 );
 ```
 
-Both ends are inclusive and compared with `ts_nats` at microsecond precision, in UTC. On nats-server 2.11 or later, a stream with `allow_direct` finds the start in one request. Otherwise the start is found by binary search, which takes about 20 requests on a stream of a million messages. The scan stops at the first message after `end_time`.
+Both ends are inclusive and compared with `ts_nats` at microsecond precision, in UTC. On nats-server 2.11 or later, a stream with `allow_direct` finds the start in one request. Otherwise the start is found by binary search, which takes about 20 requests on a stream of a million messages. The scan stops at the first message after `end_time`. Both assume that message times increase with sequence, as they do unless the server's clock moved back, for example when a stream's leader moves to a server whose clock is behind.
 
 Sequence and time options combine: `start_seq := 1000, end_time := ...` reads from sequence 1000 up to that time.
 
@@ -93,7 +93,7 @@ The scan narrows its read for these conditions:
 - `subject = '...'`;
 - `subject LIKE 'a.b.%'` and `starts_with(subject, 'a.b.')`, when the prefix ends with a dot; these become the subject filter `a.b.>`.
 
-Conditions joined with `AND` narrow the read together, and they also combine with the options. A `WHERE` clause on `subject` does not replace a `subject` option.
+The subject or prefix must be a plain one, without `*` or `>` tokens or empty tokens. Conditions joined with `AND` narrow the read together, and they also combine with the options. A `WHERE` clause on `subject` does not replace a `subject` option. Conditions on `ts_nats` read like `start_time` and `end_time`, so they make the same assumption about message times.
 
 DuckDB applies every other condition after reading, such as `OR`, `LIKE '%power%'` or a prefix that ends mid-token. `EXPLAIN` shows the subject, sequences and times the scan reads.
 
@@ -237,7 +237,7 @@ How many messages a request returns depends on the server and the stream:
 | `allow_direct` | Direct get batches of up to 2,048 messages or 8 MB | Direct gets, one message per request |
 | no `allow_direct` | JetStream API (`$JS.API.STREAM.MSG.GET`), one message per request | The same |
 
-Any replica can answer a direct get. Only the stream leader answers the JetStream API.
+Any replica can answer a direct get, so on a replicated stream a read can miss the latest messages when the replica that answers is behind. Only the stream leader answers the JetStream API.
 
 The server's round trip is the main cost. On loopback, batches read about 700,000 small messages a second, and single messages about 30,000. Over a 1 ms network round trip, single messages drop to about 1,000 a second. For large reads, give the stream `allow_direct` and use nats-server 2.11 or later.
 
